@@ -54,3 +54,13 @@ All switches connect to ground.
  - 0V --> ESP 0V
  - M1 --> to dc motor
  - M2 --> to dc motor
+
+**Switches**:
+ - Closed: switch closed when blind is fully closed (outputs 0V when switch is closed)
+ - Open: switch closed when blind is fully open  (outputs 0V when switch is closed)
+ - do_open: switch to open the blind (0V when switch is momentarily closed)
+ - do_close: switch to close the blind (0V when switch is momentarily closed)
+ 
+ 
+ 
+ 
