@@ -5,6 +5,11 @@ An ESP8266 based blind controller, to control (for example) a window blind for a
 
 ## Features
 
+ - Control
+ 	- Open blind until fully opened
+	- Close blind until fully closed
+	- Stop open/close action by clicking close/open once
+	- Timeout on close/open actions
  - Webinterface
 	 - Control
 		 - open
@@ -13,9 +18,9 @@ An ESP8266 based blind controller, to control (for example) a window blind for a
 	 - [Configuration](https://github.com/mjj4791/blind/blob/master/img/config.png)
 	 - [Detailed Device state](https://github.com/mjj4791/blind/blob/master/img/State.png)
  - MQTT integration
-	 - publish state
-	 - receive commands
-	 - LWT-support
+	 - publish state (UNKNOWN/OPEN/CLOSING/CLOSED/OPENING)
+	 - receive commands (open/close/stop)
+	 - LWT-support (Online/Offline)
  - Syslog & serial logging
 
 
