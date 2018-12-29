@@ -43,11 +43,11 @@ An ESP8266 based blind controller, to control (for example) a window blind for a
 All switches connect to ground.
 
 **L298N**:
-IN1 --> ESP D3
-IN2 --> ESP D4
-ENA --> bridged
-12V --> Poweradapter
-5V --> ESP 5V
-0V --> ESP 0V
-M1 --> to dc motor
-M2 --> to dc motor
+ - IN1 --> ESP D3
+ - IN2 --> ESP D4
+ - ENA --> bridged
+ - 12V --> Poweradapter
+ - 5V --> ESP 5V
+ - 0V --> ESP 0V
+ - M1 --> to dc motor
+ - M2 --> to dc motor
