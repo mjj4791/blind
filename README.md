@@ -1,6 +1,8 @@
 # Blind
 An ESP8266 based blind controller, to control (for example) a window blind for a skylight.
 
+![test](https://github.com/mjj4791/blind/blob/master/img/Main.png)
+
 ## Features
 
  - Webinterface
@@ -8,12 +10,13 @@ An ESP8266 based blind controller, to control (for example) a window blind for a
 		 - open
 		 - close
 		 - stop
-	 - Configuration
-	 - Detailed Device state
+	 - [Configuration](https://github.com/mjj4791/blind/blob/master/img/config.png)
+	 - [Detailed Device state](https://github.com/mjj4791/blind/blob/master/img/State.png)
  - MQTT integration
 	 - publish state
 	 - receive commands
 	 - LWT-support
+ - Syslog & serial logging
 
 
 ## Hardware
