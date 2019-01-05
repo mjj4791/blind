@@ -18,21 +18,16 @@
  * 0.9.1    20181229  Added Info page
  *                    Added links to all libraries used
  *                    Optimized comments
- * 
+ * 0.9.2    20190104  Publish without retaining; always publish current state at connect.
+ *                    Mqtt or webinterface close or open will always close or open, 
+ *                     independent of the current state. Open or Close via switch, 
+ *                     doOpen will open or stop / doClose will close or stop 
+ *                     (depending on the current state).
+ *                    digital in pins now require external pullup (opened/closed and doOpen and doClose)
  **************************************************************/
-  const char* VERSION = "0.9.1 (20181229)";
-  const char* COPYRIGHT = "(c) Janssen Development, 2018.";
-/**************************************************************
- * STATE DIAGRAM
- *    -------------------->OPENING-----------------
- *    |                       |                   |
- *  open()                 time-out()             |
- *    |                       |                   |
- *  CLOSED<---swClosed()<--UNKNOWN-->swOpen()--->OPEN
- *    ^                       ^                   |
- *    |                    timeout              close()
- *    |                       |                   |
- *    -------swClosed()<---CLOSING<----------------
+  const char* VERSION = "0.9.2 (20190104)";
+  const char* COPYRIGHT = "(c) Janssen Development, 2019.";
+/***********************se***************************************
  *    
  **************************************************************/
  
@@ -360,10 +355,10 @@ void setup()
   pinMode(config.pin_in1, OUTPUT);
   pinMode(config.pin_in2, OUTPUT);
 
-  pinMode(config.pin_opened, INPUT_PULLUP);
-  pinMode(config.pin_closed, INPUT_PULLUP);
-  pinMode(config.pin_doopen, INPUT_PULLUP);
-  pinMode(config.pin_doclose, INPUT_PULLUP);
+  pinMode(config.pin_opened, INPUT);
+  pinMode(config.pin_closed, INPUT);
+  pinMode(config.pin_doopen, INPUT);
+  pinMode(config.pin_doclose, INPUT);
 
   // Set outputs to LOW
   digitalWrite(config.pin_in1, LOW);;
@@ -440,8 +435,8 @@ void PubSubConnect()
         log(LOG_INFO, "Connected");  
         
         client.subscribe(cDo);
-        client.publish(cLWT, "Online", true);
-        client.publish(cState, getStateName());
+        client.publish(cLWT, "Online", false);
+        client.publish(cState, getStateName(), false);
       } else {
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
       }
@@ -453,8 +448,8 @@ void PubSubConnect()
         log(LOG_INFO, "Connected");  
         
         client.subscribe(cDo);
-        client.publish(cLWT, "Online", true);
-        client.publish(cState, getStateName());
+        client.publish(cLWT, "Online", false);
+        client.publish(cState, getStateName(), false);
       } else {
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
       }
@@ -1384,7 +1379,7 @@ void setStateClosed()
       {
         char cState[config.mqtt_state.length() +1];
         config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), true);
+        client.publish(cState, getStateName(), false);
       }
     }
     
@@ -1416,7 +1411,7 @@ void setStateClosing()
       {
         char cState[config.mqtt_state.length() +1];
         config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), true);
+        client.publish(cState, getStateName(), false);
       }
     }
     
@@ -1448,7 +1443,7 @@ void setStateOpen()
       {
         char cState[config.mqtt_state.length() +1];
         config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), true);
+        client.publish(cState, getStateName(), false);
       }
     }
     
@@ -1480,7 +1475,7 @@ void setStateOpening()
       {
         char cState[config.mqtt_state.length() +1];
         config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), true);
+        client.publish(cState, getStateName(), false);
       }
     }
     
@@ -1512,7 +1507,7 @@ void setStateUnknown()
       {
         char cState[config.mqtt_state.length() +1];
         config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), true);
+        client.publish(cState, getStateName(), false);
       }
     }
   
@@ -1528,23 +1523,12 @@ void setStateUnknown()
 void HandlePins() 
 {
  /* -----------------------------------------------------------
-  * STATE DIAGRAM
-  *    -------------------->OPENING-----------------
-  *    |                       |                   |
-  *  open()                 time-out()             |
-  *    |                       |                   |
-  *  CLOSED<---swClosed()<--UNKNOWN-->swOpen()--->OPEN
-  *    ^                       ^                   |
-  *    |                    timeout              close()
-  *    |                       |                   |
-  *    -------swClosed()<---CLOSING<----------------
   * -----------------------------------------------------------*/ 
   bool opened =  (digitalRead(config.pin_opened) == LOW );
   bool closed =  (digitalRead(config.pin_closed) == LOW );
-  bool doopen =  (digitalRead(config.pin_doopen) == LOW ) || do_open;
-  bool doclose = (digitalRead(config.pin_doclose) == LOW) || do_close;
-  bool dostop = do_stop;
-
+  bool doopen =  (digitalRead(config.pin_doopen) == LOW );
+  bool doclose = (digitalRead(config.pin_doclose) == LOW);
+  
   //log(LOG_INFO, "opened: %d, closed: %d, doopen: %d, doclose: %d, dostop: %d", opened, closed, doopen, doclose, dostop); 
   
   // ****************************************************************
@@ -1566,12 +1550,12 @@ void HandlePins()
   switch (curState)
   {  
     case STATE_OPEN:
-      if (doclose) 
+      if (doclose || do_close) 
       {
         log(LOG_INFO, "OPEN: doClose!");
         setStateClosing();
       }
-      if (dostop)
+      if (do_stop)
       {
         log(LOG_INFO, "OPEN: doStop!");
         setStateOpen();
@@ -1583,10 +1567,16 @@ void HandlePins()
         log(LOG_INFO, "OPENING: opened!");
         setStateOpen();
       }
-      else if (doclose || dostop)
+      else if (doclose || do_stop)
       {
         log(LOG_INFO, "OPENING: doStop or doClose!");
         setStateUnknown();
+      }
+      else if (do_close)
+      {
+        log(LOG_INFO, "OPENING: do_close!");
+        setStateUnknown();    // stop motor running
+        setStateClosing();    // reverse motor
       }
       break;
     case STATE_CLOSING:
@@ -1595,31 +1585,37 @@ void HandlePins()
         log(LOG_INFO, "CLOSING: closed!");
         setStateClosed();
       }
-      else if (doopen || dostop)
+      else if (doopen || do_stop)
       { 
         log(LOG_INFO, "CLOSING: doOpen or doStop!");
         setStateUnknown();
       }
+      else if (do_open )
+      { 
+        log(LOG_INFO, "CLOSING: do_open !");
+        setStateUnknown();    // stop motor running
+        setStateOpening();    // reverse motor
+      }
       break;
     case STATE_CLOSED:
-      if (doopen)
+      if (doopen || do_open)
       {
         log(LOG_INFO, "CLOSED: doOpen!");
         setStateOpening();
       }
-      else if (doclose || dostop) 
+      else if (doclose || do_close || do_stop) 
       {
         log(LOG_INFO, "CLOSED: doStop or doClose!");
         setStateClosed();
       }
       break;
     case STATE_UNKNOWN:
-      if (doopen)
+      if (doopen || do_open)
       {
         log(LOG_INFO, "UNKNOWN: doOpen!");
         setStateOpening();
       }
-      else if (doclose)
+      else if (doclose || do_close)
       {
         log(LOG_INFO, "UNKNOWN: doClose!");
         setStateClosing();
