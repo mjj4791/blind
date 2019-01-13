@@ -24,8 +24,11 @@
  *                     doOpen will open or stop / doClose will close or stop 
  *                     (depending on the current state).
  *                    digital in pins now require external pullup (opened/closed and doOpen and doClose)
+ * 0.9.3    20190108  Use DebouncedSwitch library for debounding and EMI prevention.
+ *                    Store lastConnectAttempt time at the end of the PubSubClient connect attempt
+ *                    Correctly set and use hostname for dhcp / WiFi access
  **************************************************************/
-  const char* VERSION = "0.9.2 (20190104)";
+  const char* VERSION = "0.9.3 (20190108)";
   const char* COPYRIGHT = "(c) Janssen Development, 2019.";
 /***********************se***************************************
  *    
@@ -41,6 +44,7 @@
 #include <PubSubClient.h>         // https://pubsubclient.knolleary.net/api.html
 #include <WiFiUdp.h>              // https://www.arduino.cc/en/Reference/WiFiUDPConstructor
 #include <Syslog.h>               // https://github.com/arcao/Syslog
+#include <DebouncedSwitch.h>
 
 // **************************************************
 // CONSTANTS:
@@ -52,12 +56,22 @@ const int STATE_CLOSED = 2;
 const int STATE_OPENING = 3;
 const int STATE_CLOSING = 4;
 
+//MQTT topic endings:
+const char * MQTT_STATE = "/state";
+const char * MQTT_DO = "/do";
+const char * MQTT_LWT = "/LWT";
+
+const char * MQTT_LWT_OFFLINE = "Offline";
+const char * MQTT_LWT_ONLINE = "Online";
+
 // state names
-char * NAME_UNKNOWN = "UNKNOWN";
-char * NAME_OPEN =    "OPEN";
-char * NAME_CLOSED =  "CLOSED";
-char * NAME_OPENING = "OPENING";
-char * NAME_CLOSING = "CLOSING";
+const char * NAME_UNKNOWN = "UNKNOWN";
+const char * NAME_OPEN =    "OPEN";
+const char * NAME_CLOSED =  "CLOSED";
+const char * NAME_OPENING = "OPENING";
+const char * NAME_CLOSING = "CLOSING";
+
+const char* STATE_NAMES[5] = { NAME_UNKNOWN, NAME_OPEN, NAME_CLOSED, NAME_OPENING, NAME_CLOSING };
 
 // for config save/retrieve (json parameter names):
 const char* ENABLE = "enable";                // master enable/disable
@@ -103,6 +117,11 @@ const int DEF_TIMEOUT = 20;
 // **************************************************
 // Global variables
 // --------------------------------------------------
+DebouncedSwitch *openedSW;  // opened switch
+DebouncedSwitch *closedSW;  // opened switch
+DebouncedSwitch *doOpenSW;  // opened switch
+DebouncedSwitch *doCloseSW;  // opened switch
+
 std::unique_ptr<ESP8266WebServer> server;   // Set web server
 
 // A UDP instance to let us send and receive packets over UDP
@@ -152,17 +171,14 @@ int Rollover=0;
 
 /**** state related ***/
 int curState = STATE_UNKNOWN;
-unsigned long timeoutStart = 0;   // the time the delay started
-bool timeoutRunning = false;      // true if still waiting for delay to finish
-bool debounceRunning = false;     // true if we are waiting for a switch to debounce
-                                  // used for manual up/down keys
-unsigned long debounceStart = 0;  // the time the debounce started (usng 800 ms to debounce)
-unsigned long lastConnectAttempt = 0;  // the last time we tried to connect to mqtt server
+unsigned long timeoutStart = 0;         // the time the delay started
+bool timeoutRunning = false;            // true if still waiting for delay to finish                                       
+unsigned long lastConnectAttempt = 0;   // the last time we tried to connect to mqtt server
 
 //Booleans to allow control via webpage & mqtt:
-bool do_stop = false;
-bool do_open = false;
-bool do_close = false;
+bool do_stop = false;                   // stop motor running
+bool do_open = false;                   // open blind
+bool do_close = false;                  // close blind
 /**********************/
 
 /*************************
@@ -330,11 +346,11 @@ void ReadConfig()
     config.syslog_enable = false; 
   }
   config.mqtt_state = config.hostname;
-    config.mqtt_state += "/state";
+    config.mqtt_state += MQTT_STATE;
   config.mqtt_do = config.hostname;
-    config.mqtt_do += "/do";
+    config.mqtt_do += MQTT_DO;
   config.mqtt_lwt = config.hostname;
-    config.mqtt_lwt += "/LWT";    
+    config.mqtt_lwt += MQTT_LWT;    
   //end read
 }
 
@@ -345,11 +361,11 @@ void setup()
 {
   Serial.begin(115200);
 
-  ReadConfig();           // read config from json file
-  NetworkInit();          // Initialize WiFi
-  SysLogInit();           // setup syslog
-  WebServerInit();        // start webserver
-
+  ReadConfig();                                         // read config from json file
+  NetworkInit();                                        // Initialize WiFi
+  SysLogInit();                                         // setup syslog
+  WebServerInit();                                      // start webserver
+  
   //----------------------------------------------
   // Initialize the output variables as outputs
   pinMode(config.pin_in1, OUTPUT);
@@ -360,12 +376,17 @@ void setup()
   pinMode(config.pin_doopen, INPUT);
   pinMode(config.pin_doclose, INPUT);
 
+  openedSW  = new DebouncedSwitch(config.pin_opened);   // opened switch
+  closedSW  = new DebouncedSwitch(config.pin_closed);   // closed switch
+  doOpenSW  = new DebouncedSwitch(config.pin_doopen);   // doOpen switch
+  doCloseSW = new DebouncedSwitch(config.pin_doclose);  // doClose switch
+  
   // Set outputs to LOW
   digitalWrite(config.pin_in1, LOW);;
   digitalWrite(config.pin_in2, LOW);;
   //----------------------------------------------
   
-  PubSubInit();           // Initialize PubSubClient
+  PubSubInit();                                         // Initialize PubSubClient
 }
 
 /****************************
@@ -402,8 +423,6 @@ void PubSubConnect()
   {
     log(LOG_INFO, "Connecting mqtt...");
     
-    lastConnectAttempt = millis();
-
     char cUser[config.mqtt_user.length() + 1];
     char cPwd[config.mqtt_pwd.length() + 1];
     char cHost[config.hostname.length() + 1];
@@ -412,8 +431,6 @@ void PubSubConnect()
     char cDo[config.mqtt_do.length() + 1];
     char cState[config.mqtt_state.length() + 1];
 
-    WiFi.mode(WIFI_STA);
-    
     config.hostname.toCharArray(cHost, config.hostname.length() + 1);
     config.mqtt_do.toCharArray(cDo, config.mqtt_do.length() + 1);
     config.mqtt_state.toCharArray(cState, config.mqtt_state.length() + 1);
@@ -431,11 +448,11 @@ void PubSubConnect()
     {
       log(LOG_INFO, "Connecting with user/pwd...");
       //boolean connect (clientID, username, password, willTopic, willQoS, willRetain, willMessage)
-      if (client.connect(cHost, cUser, cPwd, cLWT, 1, 1, "Offline")) {
+      if (client.connect(cHost, cUser, cPwd, cLWT, 1, 1, MQTT_LWT_OFFLINE)) {
         log(LOG_INFO, "Connected");  
         
         client.subscribe(cDo);
-        client.publish(cLWT, "Online", false);
+        client.publish(cLWT, MQTT_LWT_ONLINE, false);
         client.publish(cState, getStateName(), false);
       } else {
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
@@ -444,25 +461,28 @@ void PubSubConnect()
     else 
     {
       log(LOG_INFO, "Connecting without user/pwd...");  
-      if (client.connect(cHost, cLWT, 1, 1, "Offline")) {
+      if (client.connect(cHost, cLWT, 1, 1, MQTT_LWT_OFFLINE)) {
         log(LOG_INFO, "Connected");  
         
         client.subscribe(cDo);
-        client.publish(cLWT, "Online", false);
+        client.publish(cLWT, MQTT_LWT_ONLINE, false);
         client.publish(cState, getStateName(), false);
       } else {
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
       }
     }
+    
+    lastConnectAttempt = millis();
   }
 }
 
 /****************************
  * Return name of curState
  ****************************/
-char * getStateName() 
+const char * getStateName() 
 {
-  switch (curState)
+  return STATE_NAMES[curState];
+  /*switch (curState)
   {
     case STATE_OPEN:
       return NAME_OPEN;
@@ -474,7 +494,7 @@ char * getStateName()
       return NAME_CLOSING;
     default:
       return NAME_UNKNOWN;
-  }
+  }*/
 }
 
 /****************************
@@ -563,7 +583,9 @@ void NetworkInit()
   WiFi.persistent(true);
   WiFi.setAutoConnect(true);
   WiFi.setAutoReconnect(true);
+  WiFi.mode(WIFI_STA);
   WiFi.hostname(config.hostname);
+  
   // sets timeout until configuration portal gets turned off
   // useful to make it all retry or go to sleep
   // in seconds
@@ -1362,31 +1384,24 @@ void motorOpen()
  ***********************************/
 void setStateClosed()
 {
-  if (!debounceRunning)
-  {
-    log(LOG_INFO, "setStateClosed...");
+  log(LOG_INFO, "setStateClosed...");
+
+  do_close = false;
+  do_open = false;
+  do_stop = false;
   
-    do_close = false;
-    do_open = false;
-    do_stop = false;
-    
-    motorStop(); 
-    if (curState != STATE_CLOSED)
+  motorStop(); 
+  if (curState != STATE_CLOSED)
+  {
+    log(LOG_INFO, "Blind is closed.");
+    curState = STATE_CLOSED;
+    if (client.connected() )
     {
-      log(LOG_INFO, "Blind is closed.");
-      curState = STATE_CLOSED;
-      if (client.connected() )
-      {
-        char cState[config.mqtt_state.length() +1];
-        config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), false);
-      }
+      char cState[config.mqtt_state.length() +1];
+      config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
+      client.publish(cState, getStateName(), false);
     }
-    
-    // stop debounce timer:
-    debounceStart = 0;
-    debounceRunning = false;
-  }
+  }  
 }
 
 /***********************************
@@ -1394,31 +1409,24 @@ void setStateClosed()
  ***********************************/
 void setStateClosing() 
 {
-  if (!debounceRunning)
-  {
-    log(LOG_INFO, "setStateClosing...");
+  log(LOG_INFO, "setStateClosing...");
+
+  do_close = false;
+  do_open = false;
+  do_stop = false;
   
-    do_close = false;
-    do_open = false;
-    do_stop = false;
-    
-    motorClose(); 
-    if (curState != STATE_CLOSING)
+  motorClose(); 
+  if (curState != STATE_CLOSING)
+  {
+    log(LOG_INFO, "Blind will close...");
+    curState = STATE_CLOSING;
+    if (client.connected() )
     {
-      log(LOG_INFO, "Blind will close...");
-      curState = STATE_CLOSING;
-      if (client.connected() )
-      {
-        char cState[config.mqtt_state.length() +1];
-        config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), false);
-      }
+      char cState[config.mqtt_state.length() +1];
+      config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
+      client.publish(cState, getStateName(), false);
     }
-    
-    // start debounce timer:
-    debounceStart = millis();
-    debounceRunning = true;
-  }
+  }  
 }
 
 /***********************************
@@ -1426,30 +1434,23 @@ void setStateClosing()
  ***********************************/
 void setStateOpen() 
 {
-  if (!debounceRunning)
-  {  
-    log(LOG_INFO, "setStateOpen...");
-    
-    do_close = false;
-    do_open = false;
-    do_stop = false;
-    
-    motorStop(); 
-    if (curState != STATE_OPEN)
+  log(LOG_INFO, "setStateOpen...");
+  
+  do_close = false;
+  do_open = false;
+  do_stop = false;
+  
+  motorStop(); 
+  if (curState != STATE_OPEN)
+  {
+    log(LOG_INFO, "Blind is open.");
+    curState = STATE_OPEN;
+    if (client.connected() )
     {
-      log(LOG_INFO, "Blind is open.");
-      curState = STATE_OPEN;
-      if (client.connected() )
-      {
-        char cState[config.mqtt_state.length() +1];
-        config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), false);
-      }
+      char cState[config.mqtt_state.length() +1];
+      config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
+      client.publish(cState, getStateName(), false);
     }
-    
-    // stop debounce timer:
-    debounceStart = 0;
-    debounceRunning = false;
   }
 }
 
@@ -1458,30 +1459,23 @@ void setStateOpen()
  ***********************************/
 void setStateOpening() 
 {
-  if (!debounceRunning)
-  {
-    log(LOG_INFO, "setStateOpening...");
+  log(LOG_INFO, "setStateOpening...");
+
+  do_close = false;
+  do_open = false;
+  do_stop = false;
   
-    do_close = false;
-    do_open = false;
-    do_stop = false;
-    
-    motorOpen(); 
-    if (curState != STATE_OPENING)
+  motorOpen(); 
+  if (curState != STATE_OPENING)
+  {
+    log(LOG_INFO, "Blind will open...");
+    curState = STATE_OPENING;
+    if (client.connected() )
     {
-      log(LOG_INFO, "Blind will open...");
-      curState = STATE_OPENING;
-      if (client.connected() )
-      {
-        char cState[config.mqtt_state.length() +1];
-        config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), false);
-      }
+      char cState[config.mqtt_state.length() +1];
+      config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
+      client.publish(cState, getStateName(), false);
     }
-    
-    // start debounce timer:
-    debounceStart = millis();
-    debounceRunning = true;
   }
 }
 
@@ -1490,31 +1484,24 @@ void setStateOpening()
  ***********************************/
 void setStateUnknown() 
 {
-  if (!debounceRunning)
+  log(LOG_INFO, "setStateUnknown...");
+
+  do_close = false;
+  do_open = false;
+  do_stop = false;
+
+  motorStop(); 
+  if (curState != STATE_UNKNOWN)
   {
-    log(LOG_INFO, "setStateUnknown...");
-  
-    do_close = false;
-    do_open = false;
-    do_stop = false;
-  
-    motorStop(); 
-    if (curState != STATE_UNKNOWN)
+    log(LOG_INFO, "Blind will stop...");
+    curState = STATE_UNKNOWN;
+    if (client.connected() )
     {
-      log(LOG_INFO, "Blind will stop...");
-      curState = STATE_UNKNOWN;
-      if (client.connected() )
-      {
-        char cState[config.mqtt_state.length() +1];
-        config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
-        client.publish(cState, getStateName(), false);
-      }
+      char cState[config.mqtt_state.length() +1];
+      config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
+      client.publish(cState, getStateName(), false);
     }
-  
-    // start debounce timer:
-    debounceStart = millis();
-    debounceRunning = true;
-  } 
+  }
 }
 
 /***********************************
@@ -1524,20 +1511,13 @@ void HandlePins()
 {
  /* -----------------------------------------------------------
   * -----------------------------------------------------------*/ 
-  bool opened =  (digitalRead(config.pin_opened) == LOW );
-  bool closed =  (digitalRead(config.pin_closed) == LOW );
-  bool doopen =  (digitalRead(config.pin_doopen) == LOW );
-  bool doclose = (digitalRead(config.pin_doclose) == LOW);
+  openedSW->update();  // call this every loop to update switch state
+  closedSW->update();  // call this every loop to update switch state
+  doOpenSW->update();  // call this every loop to update switch state
+  doCloseSW->update(); // call this every loop to update switch state
   
-  //log(LOG_INFO, "opened: %d, closed: %d, doopen: %d, doclose: %d, dostop: %d", opened, closed, doopen, doclose, dostop); 
+  //log(LOG_INFO, "HandlePins: openedSW:closedSW:doOpenSW:doCloseSW - %i:%i:%i:%i", openedSW->isDown(), closedSW->isDown(), doOpenSW->isDown(), doCloseSW->isDown());
   
-  // ****************************************************************
-  // check debounce timer:
-  if (debounceRunning && ((millis() - debounceStart) >= (800))) 
-  {
-    log(LOG_INFO, "Stopping debounce timer.");
-    debounceRunning = false; // finished timeout -- single shot, once only
-  }
   // ****************************************************************
   // check for timeout:
   if (timeoutRunning && ((millis() - timeoutStart) >= (config.timeout*1000))) 
@@ -1550,7 +1530,7 @@ void HandlePins()
   switch (curState)
   {  
     case STATE_OPEN:
-      if (doclose || do_close) 
+      if ((doCloseSW->isChanged() && doCloseSW->isDown()) || do_close) 
       {
         log(LOG_INFO, "OPEN: doClose!");
         setStateClosing();
@@ -1562,12 +1542,12 @@ void HandlePins()
       }
       break;
     case STATE_OPENING:
-      if (opened)
+      if (openedSW->isChanged() && openedSW->isDown())
       {
         log(LOG_INFO, "OPENING: opened!");
         setStateOpen();
       }
-      else if (doclose || do_stop)
+      else if ( (doCloseSW->isChanged() && doCloseSW->isDown()) || do_stop)
       {
         log(LOG_INFO, "OPENING: doStop or doClose!");
         setStateUnknown();
@@ -1580,17 +1560,17 @@ void HandlePins()
       }
       break;
     case STATE_CLOSING:
-      if (closed)
+      if (closedSW->isChanged() && closedSW->isDown())
       {
         log(LOG_INFO, "CLOSING: closed!");
         setStateClosed();
       }
-      else if (doopen || do_stop)
+      else if ( (doOpenSW->isChanged() && doOpenSW->isDown()) || do_stop)
       { 
         log(LOG_INFO, "CLOSING: doOpen or doStop!");
         setStateUnknown();
       }
-      else if (do_open )
+      else if (do_open)
       { 
         log(LOG_INFO, "CLOSING: do_open !");
         setStateUnknown();    // stop motor running
@@ -1598,24 +1578,19 @@ void HandlePins()
       }
       break;
     case STATE_CLOSED:
-      if (doopen || do_open)
+      if ( (doOpenSW->isChanged() && doOpenSW->isDown()) || do_open)
       {
         log(LOG_INFO, "CLOSED: doOpen!");
         setStateOpening();
       }
-      else if (doclose || do_close || do_stop) 
-      {
-        log(LOG_INFO, "CLOSED: doStop or doClose!");
-        setStateClosed();
-      }
       break;
     case STATE_UNKNOWN:
-      if (doopen || do_open)
+      if ( (doOpenSW->isChanged() && doOpenSW->isDown()) || do_open)
       {
         log(LOG_INFO, "UNKNOWN: doOpen!");
         setStateOpening();
       }
-      else if (doclose || do_close)
+      else if ( (doCloseSW->isChanged() && doCloseSW->isDown()) || do_close)
       {
         log(LOG_INFO, "UNKNOWN: doClose!");
         setStateClosing();
@@ -1639,21 +1614,18 @@ void callback(char* topic, byte* payload, unsigned int length)
     
     if (strcmp(msg, "open")==0)
     {
-      log(LOG_INFO, "mqtt: open");
       do_close = false;
       do_open = true;
       do_stop = false;
     }
     if (strcmp(msg, "close") == 0)
     {
-      log(LOG_INFO, "mqtt: close");
       do_close = true;
       do_open = false;
       do_stop = false;
     }
     if (strcmp(msg, "stop") == 0)
     {
-      log(LOG_INFO, "mqtt: stop");
       do_close = false;
       do_open = false;
       do_stop = true;
