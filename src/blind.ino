@@ -1,6 +1,17 @@
 /**************************************************************
  * ROLLER BLINDS
  * 
+ * Build options:
+ *  Board:          Lolin(Wemos) D1 R2 & mini
+ *  Upload speed:   921600
+ *  Cpu frequency:  80MHz
+ *  Flash size:     4M (1M spiffs)
+ *  Debug port:     disabled
+ *  Debug level:    none
+ *  IwIP variant:   v2 Lower Memory
+ *  VTables:        Flash
+ *  Erase flash:    only sketch
+ *  
  * -----------------------------------------------------------
  * VERSION
  * 0.1.0    20181203  Initial Version
@@ -27,8 +38,11 @@
  * 0.9.3    20190108  Use DebouncedSwitch library for debounding and EMI prevention.
  *                    Store lastConnectAttempt time at the end of the PubSubClient connect attempt
  *                    Correctly set and use hostname for dhcp / WiFi access
+ * 0.9.4    20190122  Added Build options
+ *                    Impllemented WiFi reconnect loop, to allow WiFi to reconnect after failure.
+ *                    WiFi reconnect: https://github.com/esp8266/Arduino/issues/4166
  **************************************************************/
-  const char* VERSION = "0.9.3 (20190108)";
+  const char* VERSION = "0.9.4 (20190122)";
   const char* COPYRIGHT = "(c) Janssen Development, 2019.";
 /***********************se***************************************
  *    
@@ -171,9 +185,10 @@ int Rollover=0;
 
 /**** state related ***/
 int curState = STATE_UNKNOWN;
-unsigned long timeoutStart = 0;         // the time the delay started
-bool timeoutRunning = false;            // true if still waiting for delay to finish                                       
-unsigned long lastConnectAttempt = 0;   // the last time we tried to connect to mqtt server
+unsigned long timeoutStart = 0;           // the time the delay started
+bool timeoutRunning = false;              // true if still waiting for delay to finish                                       
+unsigned long lastConnectAttempt = 0;     // the last time we tried to connect to mqtt server
+unsigned long lastWiFIConnectAttempt = 0;  // the last time we tried to connect to WiFi
 
 //Booleans to allow control via webpage & mqtt:
 bool do_stop = false;                   // stop motor running
@@ -1690,15 +1705,31 @@ void loop()
 {
   // put your main code here, to run repeatedly:
   uptime(); //Runs the uptime script located below the main loop and reenters the main loop
-  
-  PubSubConnect();
-  PubSubLoop();
 
+  if (WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress(0,0,0,0)) {
+    if ( (millis() - lastWiFIConnectAttempt)>5000)
+    {
+      log(LOG_INFO, "WiFi is disconnected, trying reconnect...");
+      WiFi.reconnect();
+      delay(1000);
+      lastWiFIConnectAttempt = millis();     
+    }
+  }
+  if (WiFi.status() == WL_CONNECTED )
+  {
+    PubSubConnect();
+    PubSubLoop();
+  }
   if (config.enable) 
   {
-     HandlePins();
+    HandlePins();
   }
-  // ****************************************************************
-  // handle web requests:
-  server->handleClient();       // handle webServer
+  
+  if (WiFi.status() == WL_CONNECTED )
+  {
+    // ****************************************************************
+    // handle web requests:
+    server->handleClient();       // handle webServer
+  }
+
 }
