@@ -39,10 +39,11 @@
  *                    Store lastConnectAttempt time at the end of the PubSubClient connect attempt
  *                    Correctly set and use hostname for dhcp / WiFi access
  * 0.9.4    20190122  Added Build options
- *                    Impllemented WiFi reconnect loop, to allow WiFi to reconnect after failure.
+ *                    Implemented WiFi reconnect loop, to allow WiFi to reconnect after failure.
  *                    WiFi reconnect: https://github.com/esp8266/Arduino/issues/4166
+ * 0.9.5    20190210  Resend LWT every 5 minutes...
  **************************************************************/
-  const char* VERSION = "0.9.4 (20190122)";
+  const char* VERSION = "0.9.5 (20190210)";
   const char* COPYRIGHT = "(c) Janssen Development, 2019.";
 /***********************se***************************************
  *    
@@ -185,10 +186,11 @@ int Rollover=0;
 
 /**** state related ***/
 int curState = STATE_UNKNOWN;
-unsigned long timeoutStart = 0;           // the time the delay started
-bool timeoutRunning = false;              // true if still waiting for delay to finish                                       
-unsigned long lastConnectAttempt = 0;     // the last time we tried to connect to mqtt server
+unsigned long timeoutStart = 0;            // the time the delay started
+bool timeoutRunning = false;               // true if still waiting for delay to finish                                       
+unsigned long lastConnectAttempt = 0;      // the last time we tried to connect to mqtt server
 unsigned long lastWiFIConnectAttempt = 0;  // the last time we tried to connect to WiFi
+unsigned long lastLWTSent = 0;             // the last time we sent the LWT message
 
 //Booleans to allow control via webpage & mqtt:
 bool do_stop = false;                   // stop motor running
@@ -463,11 +465,12 @@ void PubSubConnect()
     {
       log(LOG_INFO, "Connecting with user/pwd...");
       //boolean connect (clientID, username, password, willTopic, willQoS, willRetain, willMessage)
-      if (client.connect(cHost, cUser, cPwd, cLWT, 1, 1, MQTT_LWT_OFFLINE)) {
+      if (client.connect(cHost, cUser, cPwd, cLWT, 1, true, MQTT_LWT_OFFLINE)) {
         log(LOG_INFO, "Connected");  
         
         client.subscribe(cDo);
-        client.publish(cLWT, MQTT_LWT_ONLINE, false);
+        client.publish(cLWT, MQTT_LWT_ONLINE, true);
+        lastLWTSent = millis();
         client.publish(cState, getStateName(), false);
       } else {
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
@@ -480,7 +483,7 @@ void PubSubConnect()
         log(LOG_INFO, "Connected");  
         
         client.subscribe(cDo);
-        client.publish(cLWT, MQTT_LWT_ONLINE, false);
+        client.publish(cLWT, MQTT_LWT_ONLINE, true);
         client.publish(cState, getStateName(), false);
       } else {
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
@@ -519,6 +522,16 @@ void PubSubLoop()
 {
   if (config.mqtt_enable && client.connected()) 
   {
+    if ( (millis() - lastLWTSent) > 300000)
+    {
+      // resend the LWT message
+      char cLWT[config.mqtt_lwt.length() + 1];
+      config.mqtt_lwt.toCharArray(cLWT, config.mqtt_lwt.length() + 1);
+
+      log(LOG_INFO, "Resending LWT...");
+      client.publish(cLWT, MQTT_LWT_ONLINE, true);
+      lastLWTSent = millis();
+    }
     client.loop();
   }
 }
