@@ -1,0 +1,23 @@
+{
+    "enable": true,
+    "hostname": "blind",
+    "port": 80,
+    "syslog_enable": true,
+    "syslog_server": "nas2.home",
+    "syslog_port": 514,
+    "reboot_enable": false,
+    "reboot_days": 15,
+    "mqtt_server": "nas2.home",
+    "mqtt_port": 1883,
+    "mqtt_simplestate": true,
+    "mqtt_user": "",
+    "mqtt_pwd": "",
+    "mqtt_enable": true,
+    "timeout": 20,
+    "pin_in1": 0,
+    "pin_in2": 2,
+    "pin_opened": 13,
+    "pin_closed": 5,
+    "pin_doopen": 14,
+    "pin_doclose": 12
+}

@@ -1,6 +1,6 @@
 /**************************************************************
  * ROLLER BLINDS
- * 
+ *
  * Build options:
  *  Board:          Lolin(Wemos) D1 R2 & mini
  *  Upload speed:   921600
@@ -11,14 +11,14 @@
  *  IwIP variant:   v2 Lower Memory
  *  VTables:        Flash
  *  Erase flash:    only sketch
- *  
+ *
  * -----------------------------------------------------------
  * VERSION
  * 0.1.0    20181203  Initial Version
  * 0.2.0    20181207  Added doClose will stop an opening blind
  *                          doOpen will stop a closing blind
  * 0.3.0    20181209  Added master enable/disable in config
- * 0.4.0    20181224  Added pages for state, current state 
+ * 0.4.0    20181224  Added pages for state, current state
  *                    & buttons for open & close
  * 0.5.0    20181225  Added mqtt control, added  mqtt stop cmd
  * 0.6.0    20181226  Reworked statemachine
@@ -30,9 +30,9 @@
  *                    Added links to all libraries used
  *                    Optimized comments
  * 0.9.2    20190104  Publish without retaining; always publish current state at connect.
- *                    Mqtt or webinterface close or open will always close or open, 
- *                     independent of the current state. Open or Close via switch, 
- *                     doOpen will open or stop / doClose will close or stop 
+ *                    Mqtt or webinterface close or open will always close or open,
+ *                     independent of the current state. Open or Close via switch,
+ *                     doOpen will open or stop / doClose will close or stop
  *                     (depending on the current state).
  *                    digital in pins now require external pullup (opened/closed and doOpen and doClose)
  * 0.9.3    20190108  Use DebouncedSwitch library for debounding and EMI prevention.
@@ -42,34 +42,37 @@
  *                    Implemented WiFi reconnect loop, to allow WiFi to reconnect after failure.
  *                    WiFi reconnect: https://github.com/esp8266/Arduino/issues/4166
  * 0.9.5    20190210  Resend LWT every 5 minutes...
+ * 0.9.6    20190607  Updated for vscode
+ *                    Updates to newer versions of external libs
+ *                    Configurable restart after n days uptime
+ *                    Configurate SimpleState feature (only use OPEN and CLOSE) for better Cover support in HomeAssistant
+ *                    Show uptime on Status page
  **************************************************************/
-  const char* VERSION = "0.9.5 (20190210)";
+  const char* VERSION = "0.9.6 (20190606)";
   const char* COPYRIGHT = "(c) Janssen Development, 2019.";
 /***********************se***************************************
- *    
+ *
  **************************************************************/
- 
 #include <FS.h>                   // this needs to be first, or it all crashes and burns...
 #include <ESP8266WiFi.h>          // https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266WiFi
 #include <DNSServer.h>            // https://github.com/esp8266/Arduino/tree/master/libraries/DNSServer
-#include <Dns.h>
 #include <ESP8266WebServer.h>     // https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266WebServer
 #include <WiFiManager.h>          // https://github.com/tzapu/WiFiManager
 #include <ArduinoJson.h>          // https://github.com/bblanchon/ArduinoJson
 #include <PubSubClient.h>         // https://pubsubclient.knolleary.net/api.html
 #include <WiFiUdp.h>              // https://www.arduino.cc/en/Reference/WiFiUDPConstructor
 #include <Syslog.h>               // https://github.com/arcao/Syslog
-#include <DebouncedSwitch.h>
+#include <DebouncedSwitch.h>      // https://www.forward.com.au/pfod/ArduinoProgramming/DebouncedSwitch/DebouncedSwitch.html
 
 // **************************************************
 // CONSTANTS:
 
-// state constants
-const int STATE_UNKNOWN = 0;
-const int STATE_OPEN = 1;
-const int STATE_CLOSED = 2;
-const int STATE_OPENING = 3;
-const int STATE_CLOSING = 4;
+// state constants                              Id  Name      Simple Name
+const int STATE_UNKNOWN = 0;                  // 0: UNKNOWN   OPEN
+const int STATE_OPEN = 1;                     // 1: OPEN      OPEN
+const int STATE_CLOSED = 2;                   // 1: CLOSED    CLOSED
+const int STATE_OPENING = 3;                  // 1: OPENING   OPEN
+const int STATE_CLOSING = 4;                  // 4: CLOSING   OPEN
 
 //MQTT topic endings:
 const char * MQTT_STATE = "/state";
@@ -87,19 +90,24 @@ const char * NAME_OPENING = "OPENING";
 const char * NAME_CLOSING = "CLOSING";
 
 const char* STATE_NAMES[5] = { NAME_UNKNOWN, NAME_OPEN, NAME_CLOSED, NAME_OPENING, NAME_CLOSING };
+const char* SIMPLE_STATE_NAMES[5] = { NAME_OPEN, NAME_OPEN, NAME_CLOSED, NAME_OPEN, NAME_OPEN };
 
 // for config save/retrieve (json parameter names):
-const char* ENABLE = "enable";                // master enable/disable
-const char* HOSTNAME = "hostname";            // hostname
-const char* PORT = "port";                    // webserver port
-const char* SYSLOG_ENABLE = "syslog_enable";  // syslog enable/disable
-const char* SYSLOG_SERVER = "syslog_server";  // syslog hostname
-const char* SYSLOG_PORT = "syslog_port";      // syslogport
-const char* MQTT_ENABLE = "mqtt_enable";      // enable mqtt
-const char* MQTT_SERVER = "mqtt_server";      // mqtt_server name
-const char* MQTT_PORT = "mqtt_port";          // port for mqtt server
-const char* MQTT_USER = "mqtt_user";          // user for mqtt server
-const char* MQTT_PWD = "mqtt_pwd";            // password for mqtt server
+const char* ENABLE = "enable";                        // master enable/disable
+const char* HOSTNAME = "hostname";                    // hostname
+const char* PORT = "port";                            // webserver port
+const char* SYSLOG_ENABLE = "syslog_enable";          // syslog enable/disable
+const char* SYSLOG_SERVER = "syslog_server";          // syslog hostname
+const char* SYSLOG_PORT = "syslog_port";              // syslogport
+const char* REBOOT_ENABLE = "reboot_enable";          // enable/disable automatic reboots
+const char* REBOOT_DAYS = "reboot_days";              // reboot after [1..30] days
+
+const char* MQTT_ENABLE = "mqtt_enable";              // enable mqtt
+const char* MQTT_SERVER = "mqtt_server";              // mqtt_server name
+const char* MQTT_PORT = "mqtt_port";                  // port for mqtt server
+const char* MQTT_USER = "mqtt_user";                  // user for mqtt server
+const char* MQTT_PWD = "mqtt_pwd";                    // password for mqtt server
+const char* MQTT_SIMPLESTATE = "mqtt_simplestate";    // use simplified state names (OPEN/CLOSED only)
 
 const char* PIN_IN1 = "pin_in1";              // pin to signal IN2 to Hbridge I298n
 const char* PIN_IN2 = "pin_in2";              // pin to signal IN2 to Hbridge I298n
@@ -117,9 +125,12 @@ const int DEF_PORT = 80;
 const bool DEF_SYSLOG_ENABLE = false;
 const char* DEF_SYSLOG_SERVER = "";
 const int DEF_SYSLOG_PORT = 514;
+const bool DEF_REBOOT_ENABLE = true;
+const int DEF_REBOOT_DAYS = 14;
 const char* DEF_MQTT_SERVER = "mqttserver";
 const bool DEF_MQTT_ENABLE = false;
 const int DEF_MQTT_PORT = 1883;
+const bool DEF_MQTT_SIMPLESTATE = false;
 const int DEF_IN1 = D0;
 const int DEF_IN2 = D1;
 const int DEF_OPENED = D2;
@@ -156,10 +167,13 @@ struct Config {
   bool syslog_enable;      // syslog enable
   String syslog_server;    // syslog server
   int syslog_port;         // syslog port
+  bool reboot_enable;      // enable automatic reboot
+  int reboot_days;         // reboot after [1..30] days
   bool mqtt_enable;        // enable mqtt?
   String mqtt_server;      // mqtt server
   IPAddress mqtt_ip;       // mqtt server IP address
   int mqtt_port;           // mqtt port
+  bool mqtt_simplestate;   // mqtt simple state (only open/closed)
   String mqtt_user;        // mqtt username
   String mqtt_pwd;         // mqtt password
   String mqtt_state;       // <hostname>/state
@@ -168,7 +182,7 @@ struct Config {
   int timeout;             // timout in seconds for opening or closing the blind
   int pin_in1;             // IN1/2 pin for i298n hBridge
   int pin_in2;             // IN2/4 pin for i298n hBridge
-  int pin_opened;          // OPENED pin 
+  int pin_opened;          // OPENED pin
   int pin_closed;          // CLOSED pin
   int pin_doopen;          // DO OPEN pin
   int pin_doclose;         // DO CLOSE pin
@@ -187,7 +201,7 @@ int Rollover=0;
 /**** state related ***/
 int curState = STATE_UNKNOWN;
 unsigned long timeoutStart = 0;            // the time the delay started
-bool timeoutRunning = false;               // true if still waiting for delay to finish                                       
+bool timeoutRunning = false;               // true if still waiting for delay to finish
 unsigned long lastConnectAttempt = 0;      // the last time we tried to connect to mqtt server
 unsigned long lastWiFIConnectAttempt = 0;  // the last time we tried to connect to WiFi
 unsigned long lastLWTSent = 0;             // the last time we sent the LWT message
@@ -202,7 +216,7 @@ bool do_close = false;                  // close blind
  * Log function to output
  * to Serial and syslog
  *************************/
-void log(uint16_t pri, char *fmt, ...)
+void log(uint16_t pri, const char *fmt, ...)
 {
   // print to serial:
   va_list va;
@@ -212,25 +226,24 @@ void log(uint16_t pri, char *fmt, ...)
   buf[vsnprintf(NULL, 0, fmt, va) + 1] = '\0';
   Serial.println(buf);
 
-  if (syslogReady && config.syslog_enable) 
+  if (syslogReady && config.syslog_enable)
   {
     syslog.log(pri, buf);
   }
-  
+
   va_end(va);
-} 
+}
 
 /**************************
  * Save config to file
  **************************/
-void SaveConfig() 
+void SaveConfig()
 {
   log(LOG_INFO, "Saving config...");
-  DynamicJsonBuffer jsonBuffer;
-  JsonObject& json = jsonBuffer.createObject();
-  
+  DynamicJsonDocument json(1024);
+
   File configFile = SPIFFS.open("/config.json", "w");
-  if (configFile) 
+  if (configFile)
   {
     // Set the values
     json[ENABLE] = config.enable;
@@ -239,8 +252,11 @@ void SaveConfig()
     json[SYSLOG_ENABLE] = config.syslog_enable;
     json[SYSLOG_SERVER] = config.syslog_server;
     json[SYSLOG_PORT] = config.syslog_port;
+    json[REBOOT_ENABLE] = config.reboot_enable;
+    json[REBOOT_DAYS] = config.reboot_days;
     json[MQTT_SERVER] = config.mqtt_server;
     json[MQTT_PORT] = config.mqtt_port;
+    json[MQTT_SIMPLESTATE] = config.mqtt_simplestate;
     json[MQTT_USER] = config.mqtt_user;
     json[MQTT_PWD] = config.mqtt_pwd;
     json[MQTT_ENABLE] = config.mqtt_enable;
@@ -251,9 +267,9 @@ void SaveConfig()
     json[PIN_CLOSED] = config.pin_closed;
     json[PIN_DOOPEN] = config.pin_doopen;
     json[PIN_DOCLOSE] = config.pin_doclose;
-  
-    json.printTo(Serial);
-    json.printTo(configFile);
+
+    serializeJson(json, Serial);
+    serializeJson(json, configFile);
     configFile.close();
     log(LOG_INFO, "Saved config.");
   }
@@ -268,7 +284,7 @@ void SaveConfig()
 /**************************
  * Read config from file
  **************************/
-void ReadConfig() 
+void ReadConfig()
 {
   // set default config:
   config.enable = DEF_ENABLE;
@@ -277,9 +293,12 @@ void ReadConfig()
   config.syslog_enable = DEF_SYSLOG_ENABLE;
   config.syslog_server = DEF_SYSLOG_SERVER;
   config.syslog_port = DEF_SYSLOG_PORT;
+  config.reboot_enable = DEF_REBOOT_ENABLE;
+  config.reboot_days = DEF_REBOOT_DAYS;
   config.mqtt_enable = DEF_MQTT_ENABLE;
   config.mqtt_server = DEF_MQTT_SERVER;
   config.mqtt_port = DEF_MQTT_PORT;
+  config.mqtt_simplestate = DEF_MQTT_SIMPLESTATE;
   config.mqtt_user = "";
   config.mqtt_pwd = "";
   config.timeout = DEF_TIMEOUT;
@@ -289,20 +308,20 @@ void ReadConfig()
   config.pin_closed = DEF_CLOSED;
   config.pin_doopen  = DEF_DOOPEN;
   config.pin_doclose = DEF_DOCLOSE;
-  
+
   //read configuration from FS json
   log(LOG_INFO, "Mounting FS...");
-  if (SPIFFS.begin()) 
+  if (SPIFFS.begin())
   {
     // Uncomment next line to clean FS, for testing
     // SPIFFS.format();
     log(LOG_INFO, "Mounted file system.");
-    if (SPIFFS.exists("/config.json")) 
+    if (SPIFFS.exists("/config.json"))
     {
       //file exists, reading and loading
       log(LOG_INFO, "Reading config file...");
       File configFile = SPIFFS.open("/config.json", "r");
-      if (configFile) 
+      if (configFile)
       {
         log(LOG_INFO, "Opened config file.");
         size_t size = configFile.size();
@@ -310,29 +329,33 @@ void ReadConfig()
         std::unique_ptr<char[]> buf(new char[size]);
 
         configFile.readBytes(buf.get(), size);
-        DynamicJsonBuffer jsonBuffer;
-        JsonObject& json = jsonBuffer.parseObject(buf.get());
-        json.printTo(Serial);
-        if (json.success()) 
+        DynamicJsonDocument json(1024);
+        DeserializationError error = deserializeJson(json, buf.get());
+        serializeJson(json, Serial);
+        if (error == DeserializationError::Ok)
         {
           log(LOG_INFO, "Parsed json.");
-      
-          // Copy values from the JsonObject to the Config
 
+          // Copy values from the JsonObject to the Config
           config.enable = json[ENABLE] | DEF_ENABLE;
-          
+
           if (json.containsKey(HOSTNAME) && strlen(json[HOSTNAME])>0) {
             config.hostname = json[HOSTNAME] | DEF_HOSTNAME;
           }
           config.port = json[PORT] | DEF_PORT;
-          
+
           config.syslog_enable = json[SYSLOG_ENABLE] | DEF_SYSLOG_ENABLE;
           config.syslog_server = json[SYSLOG_SERVER] | DEF_SYSLOG_SERVER;
           config.syslog_port = json[SYSLOG_PORT] | DEF_SYSLOG_PORT;
-          
+
+          config.reboot_enable = json[REBOOT_ENABLE] | DEF_REBOOT_ENABLE;
+          config.reboot_days = json[REBOOT_DAYS] | DEF_REBOOT_DAYS;
+
           config.mqtt_enable = json[MQTT_ENABLE] | DEF_MQTT_ENABLE;
           config.mqtt_server = json[MQTT_SERVER] | DEF_MQTT_SERVER;
           config.mqtt_port = json[MQTT_PORT] | DEF_MQTT_PORT;
+          config.mqtt_simplestate = json[MQTT_SIMPLESTATE] | DEF_MQTT_SIMPLESTATE;
+
           if (json.containsKey(MQTT_USER) && strlen(json[MQTT_USER])>0) {
             config.mqtt_user = json[MQTT_USER] | "";
           }
@@ -360,21 +383,21 @@ void ReadConfig()
 
   if (config.syslog_server.length() == 0 || config.syslog_port < 1 )
   {
-    config.syslog_enable = false; 
+    config.syslog_enable = false;
   }
   config.mqtt_state = config.hostname;
     config.mqtt_state += MQTT_STATE;
   config.mqtt_do = config.hostname;
     config.mqtt_do += MQTT_DO;
   config.mqtt_lwt = config.hostname;
-    config.mqtt_lwt += MQTT_LWT;    
+    config.mqtt_lwt += MQTT_LWT;
   //end read
 }
 
 /**********************
- * Setup 
+ * Setup
  **********************/
-void setup() 
+void setup()
 {
   Serial.begin(115200);
 
@@ -382,7 +405,7 @@ void setup()
   NetworkInit();                                        // Initialize WiFi
   SysLogInit();                                         // setup syslog
   WebServerInit();                                      // start webserver
-  
+
   //----------------------------------------------
   // Initialize the output variables as outputs
   pinMode(config.pin_in1, OUTPUT);
@@ -397,34 +420,34 @@ void setup()
   closedSW  = new DebouncedSwitch(config.pin_closed);   // closed switch
   doOpenSW  = new DebouncedSwitch(config.pin_doopen);   // doOpen switch
   doCloseSW = new DebouncedSwitch(config.pin_doclose);  // doClose switch
-  
+
   // Set outputs to LOW
   digitalWrite(config.pin_in1, LOW);;
   digitalWrite(config.pin_in2, LOW);;
   //----------------------------------------------
-  
+
   PubSubInit();                                         // Initialize PubSubClient
 }
 
 /****************************
  * Initialize PubSubClient
  ****************************/
-void PubSubInit() 
+void PubSubInit()
 {
-  if (config.mqtt_enable) 
+  if (config.mqtt_enable)
   {
     log(LOG_INFO, "Enabling mqtt...");
     IPAddress ip;
-      
+
     char charBuf[config.mqtt_server.length() + 1];
     config.mqtt_server.toCharArray(charBuf, config.mqtt_server.length()+1);
     charBuf[config.mqtt_server.length() + 1] = '\0';
-    
+
     // try to do dns resolution:
     WiFi.hostByName(charBuf, ip);
-    
+
     log(LOG_INFO, " server:port: %u.%u.%u.%u:%d", ip[0],ip[1],ip[2],ip[3], config.mqtt_port);
-    
+
     client.setServer(ip, config.mqtt_port);
     client.setCallback(callback);
   }
@@ -434,12 +457,12 @@ void PubSubInit()
 /****************************
  * Connect PubSubClient
  ****************************/
-void PubSubConnect() 
+void PubSubConnect()
 {
-  if (config.mqtt_enable && !client.connected() && (millis() - lastConnectAttempt) > 5000 ) 
+  if (config.mqtt_enable && !client.connected() && (millis() - lastConnectAttempt) > 5000 )
   {
     log(LOG_INFO, "Connecting mqtt...");
-    
+
     char cUser[config.mqtt_user.length() + 1];
     char cPwd[config.mqtt_pwd.length() + 1];
     char cHost[config.hostname.length() + 1];
@@ -452,7 +475,7 @@ void PubSubConnect()
     config.mqtt_do.toCharArray(cDo, config.mqtt_do.length() + 1);
     config.mqtt_state.toCharArray(cState, config.mqtt_state.length() + 1);
     config.mqtt_lwt.toCharArray(cLWT, config.mqtt_lwt.length() + 1);
-    
+
     if (config.mqtt_user.length() > 0)
     {
       config.mqtt_user.toCharArray(cUser, config.mqtt_user.length() + 1);
@@ -466,8 +489,8 @@ void PubSubConnect()
       log(LOG_INFO, "Connecting with user/pwd...");
       //boolean connect (clientID, username, password, willTopic, willQoS, willRetain, willMessage)
       if (client.connect(cHost, cUser, cPwd, cLWT, 1, true, MQTT_LWT_OFFLINE)) {
-        log(LOG_INFO, "Connected");  
-        
+        log(LOG_INFO, "Connected");
+
         client.subscribe(cDo);
         client.publish(cLWT, MQTT_LWT_ONLINE, true);
         lastLWTSent = millis();
@@ -475,13 +498,13 @@ void PubSubConnect()
       } else {
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
       }
-    } 
-    else 
+    }
+    else
     {
-      log(LOG_INFO, "Connecting without user/pwd...");  
+      log(LOG_INFO, "Connecting without user/pwd...");
       if (client.connect(cHost, cLWT, 1, 1, MQTT_LWT_OFFLINE)) {
-        log(LOG_INFO, "Connected");  
-        
+        log(LOG_INFO, "Connected");
+
         client.subscribe(cDo);
         client.publish(cLWT, MQTT_LWT_ONLINE, true);
         client.publish(cState, getStateName(), false);
@@ -489,7 +512,7 @@ void PubSubConnect()
         log(LOG_WARNING, "Failed, rc=%d; try again in 5 seconds", client.state());
       }
     }
-    
+
     lastConnectAttempt = millis();
   }
 }
@@ -497,30 +520,21 @@ void PubSubConnect()
 /****************************
  * Return name of curState
  ****************************/
-const char * getStateName() 
+const char * getStateName()
 {
-  return STATE_NAMES[curState];
-  /*switch (curState)
+  if (config.mqtt_simplestate)
   {
-    case STATE_OPEN:
-      return NAME_OPEN;
-    case STATE_CLOSED:
-      return NAME_CLOSED;
-    case STATE_OPENING:
-      return NAME_OPENING;
-    case STATE_CLOSING:
-      return NAME_CLOSING;
-    default:
-      return NAME_UNKNOWN;
-  }*/
+    return SIMPLE_STATE_NAMES[curState];
+  }
+  return STATE_NAMES[curState];
 }
 
 /****************************
  * Loop for PubSubClient
  ****************************/
-void PubSubLoop() 
+void PubSubLoop()
 {
-  if (config.mqtt_enable && client.connected()) 
+  if (config.mqtt_enable && client.connected())
   {
     if ( (millis() - lastLWTSent) > 300000)
     {
@@ -547,7 +561,7 @@ void SysLogInit()
   if (config.syslog_enable && config.syslog_server.length()>0 && config.syslog_port >0)
   {
     IPAddress addr;
-    
+
     char cServer[config.syslog_server.length() + 1];
     config.mqtt_server.toCharArray(cServer, config.syslog_server.length()+1);
     cServer[config.syslog_server.length() + 1] = '\0';
@@ -555,10 +569,10 @@ void SysLogInit()
     char cHost[config.hostname.length() + 1];
     config.hostname.toCharArray(cHost, config.hostname.length()+1);
     cHost[config.hostname.length() + 1] = '\0';
-    
+
     // try to do dns resolution:
     WiFi.hostByName(cServer, addr);
-    
+
     syslog.server(addr, config.syslog_port);
     syslog.deviceHostname(cHost);
     syslog.appName("blind");
@@ -575,10 +589,10 @@ void SysLogInit()
 /****************************
  * Initialize the webserver
  ****************************/
-void WebServerInit() 
+void WebServerInit()
 {
   log(LOG_INFO, "Starting webserver on port: %d", config.port);
-  
+
   server.reset(new ESP8266WebServer(WiFi.localIP(), config.port));
   server->onNotFound(HandleNotFound);
   server->on("/", HandleRoot);            // get root page
@@ -600,20 +614,20 @@ void WebServerInit()
 /***************************
  * Initiallizing the WiFi  *
  ***************************/
-void NetworkInit() 
+void NetworkInit()
 {
   // WiFiManager
   // Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wifiManager;
   // Uncomment and run it once, if you want to erase all the stored information
   // wifiManager.resetSettings();
-  
+
   WiFi.persistent(true);
   WiFi.setAutoConnect(true);
   WiFi.setAutoReconnect(true);
   WiFi.mode(WIFI_STA);
   WiFi.hostname(config.hostname);
-  
+
   // sets timeout until configuration portal gets turned off
   // useful to make it all retry or go to sleep
   // in seconds
@@ -623,7 +637,7 @@ void NetworkInit()
   //set minimum quality of signal so it ignores AP's under that quality
   //defaults to 8%
   //wifiManager.setMinimumSignalQuality();
-  
+
   // fetches ssid and pass and tries to connect
   // if it does not connect it starts an access point with the specified name
   // here  "AutoConnectAP"
@@ -632,7 +646,7 @@ void NetworkInit()
     apName += "AP";
   char cApName[apName.length() +1];
   apName.toCharArray(cApName, apName.length()+1);
-    
+
   wifiManager.autoConnect(cApName);
 
   // if you get here you have connected to the WiFi
@@ -644,7 +658,7 @@ void NetworkInit()
  *  Create the default html
  *  header of the page.
  ****************************/
-String HtmlHead(String pagename, String script, String onload) 
+String HtmlHead(String pagename, String script, String onload)
 {
   String message = "<!DOCTYPE html><html lang=\"en\" class=\"\">";
   message += "<head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,user-scalable=no'/>";
@@ -653,7 +667,7 @@ String HtmlHead(String pagename, String script, String onload)
     message += "</title>\n" ;
   message += "<style>div,fieldset,input,select{padding:5px;font-size:1em;}input{width:100%;box-sizing:border-box;-webkit-box-sizing:border-box;-moz-box-sizing:border-box;}select{width:100%;}textarea{resize:none;width:98%;height:318px;padding:5px;overflow:auto;}body{text-align:center;font-family:verdana;}td{padding:0px;}button{border:0;border-radius:0.3rem;background-color:#1fa3ec;color:#fff;line-height:2.4rem;font-size:1.2rem;width:100%;-webkit-transition-duration:0.4s;transition-duration:0.4s;cursor:pointer;}button:hover{background-color:#0e70a4;}.bwht{background-color:#aaaaaa;}.bwht:hover{background-color:#999999;}.bred{background-color:#d43535;}.bred:hover{background-color:#931f1f;}.bgrn{background-color:#47c266;}.bgrn:hover{background-color:#5aaf6f;}a{text-decoration:none;}.p{float:left;text-align:left;}.q{float:right;text-align:right;}</style>";
 
-  if (script.length()>1) 
+  if (script.length()>1)
   {
     message += "<script type=\"text/javascript\">";
     message += script;
@@ -663,12 +677,12 @@ String HtmlHead(String pagename, String script, String onload)
     message += "</head><body onload=\"";
     message += onload;
     message += "\">\n";
-  } 
+  }
   else
   {
-    message += "</head><body>\n";  
+    message += "</head><body>\n";
   }
-  
+
   message += "<div style='text-align:left;display:inline-block;min-width:340px;'>";
   message += "<div style='text-align:center;'><h2>";
     message += pagename;
@@ -680,7 +694,7 @@ String HtmlHead(String pagename, String script, String onload)
  * Create the default html
  * header of the page.
  ****************************/
-String HtmlHead(String pagename) 
+String HtmlHead(String pagename)
 {
   return HtmlHead(pagename, "", "");
 }
@@ -689,7 +703,7 @@ String HtmlHead(String pagename)
  * Create the default html
  * footer of the page.
  ****************************/
-String HtmlFoot() 
+String HtmlFoot()
 {
   String message = "<br/><div style='text-align:right;font-size:11px;'><hr/>\n";
   message += "Blind ";
@@ -703,7 +717,7 @@ String HtmlFoot()
 /****************************
  * Handle restart request
  ****************************/
-void HandleRestart() 
+void HandleRestart()
 {
   RestartDevice();
 }
@@ -712,20 +726,20 @@ void HandleRestart()
 /****************************
  * Handle DoOpen request
  ****************************/
-void HandleDoOpen() 
+void HandleDoOpen()
 {
   log(LOG_INFO, "HandleDoOpen");
   do_open = true;
   do_close= false;
   do_stop = false;
-  
+
   server->send ( 200, "text/plain", "");
 }
 
 /****************************
  * Handle DoStop request
  ****************************/
-void HandleDoStop() 
+void HandleDoStop()
 {
   log(LOG_INFO, "HandleDoStop");
   do_open = false;
@@ -738,13 +752,13 @@ void HandleDoStop()
 /****************************
  * Handle DoClose request
  ****************************/
-void HandleDoClose() 
+void HandleDoClose()
 {
   log(LOG_INFO, "HandleDoClose");
   do_open = false;
   do_close= true;
   do_stop = false;
-  
+
   server->send ( 200, "text/plain", "");
 }
 
@@ -753,7 +767,7 @@ void HandleDoClose()
  ****************************/
 void HandleRoot() {
   log(LOG_INFO, "HandleRoot...");
-  
+
   String script = getStateScript();
   script += "\nfunction render(data) {\n";
   script += "  var d = document.getElementById(\"curstate\");";
@@ -761,7 +775,7 @@ void HandleRoot() {
   script += "    d.innerHTML = data.state.name;\n";
   script += "  }\n";
   script += "}\n";
-  
+
   String message = HtmlHead("Main", script, "getHttpState();");
   message += "<div id=\"curstate\" style=\"text-align:center;font-weight:bold;font-size:48px\"></div>";
   message += "<button class='button bgrn' onclick='doOpen();' >Open</button><br><br>\n";
@@ -771,7 +785,7 @@ void HandleRoot() {
   message += "<form action='/state' method='get'><button class='button'>Status</button></form><br>\n";
   message += "<form action='/config' method='get'><button class='button'>Configuration</button></form><br>\n";
   message += "<form action='/restart' method='get'><button class='button bred'>Restart</button></form><br>\n";
-  
+
   message += HtmlFoot();
   server->send(200, "text/html", message);
 }
@@ -799,7 +813,7 @@ String htmlPinOption(int id, String caption, bool selected)
 /************************************************
  * Return html SELECT element with all d1-mini
  * GPIO ports.
- * Parameters: 
+ * Parameters:
  *   caption: name of the html element
  *   selected: id (gpio number) to preselect)
  ************************************************/
@@ -830,134 +844,155 @@ String htmlPinSelect(String caption, int selected)
 void HandleSubmit()
 {
   log(LOG_INFO, "HandleSubmit...");
-  
+
   bool save = false;
-  if (server->args() > 0 ) 
+  if (server->args() > 0 )
   {
     // disable; will enable if parameter is set....
     config.syslog_enable = false;
     config.mqtt_enable = false;
     config.enable = false;
-      
-    for ( uint8_t i = 0; i < server->args(); i++ ) 
+    config.reboot_enable = false;
+    config.mqtt_simplestate = false;
+
+    for ( uint8_t i = 0; i < server->args(); i++ )
     {
       //log(LOG_INFO, server->argName(i));
       char cArgI[server->arg(i).length() + 1];
       server->arg(i).toCharArray(cArgI, server->arg(i).length()+1);
       cArgI[server->arg(i).length() + 1] = '\0';
 
-      if (server->argName(i) == ENABLE) 
+      if (server->argName(i) == ENABLE)
       {
         log(LOG_INFO, "Setting enable: %s", cArgI);
         config.enable = (server->arg(i) == "1");
         save = true;
       }
-      else if (server->argName(i) == HOSTNAME) 
+      else if (server->argName(i) == HOSTNAME)
       {
         // do something here with value from server.arg(i);
         log(LOG_INFO, "Setting hostname: %s", cArgI);
         config.hostname = server->arg(i);
         save = true;
       }
-      else if (server->argName(i) == PORT) 
+      else if (server->argName(i) == PORT)
       {
         // do something here with value from server.arg(i);
         log(LOG_INFO, "Setting port: %d", server->arg(i).toInt());
         config.port = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == SYSLOG_ENABLE) 
+      else if (server->argName(i) == SYSLOG_ENABLE)
       {
         log(LOG_INFO, "Setting syslog enable: %s", cArgI);
         config.syslog_enable = (server->arg(i) == "1");
         save = true;
       }
-      else if (server->argName(i) == SYSLOG_SERVER) 
+      else if (server->argName(i) == SYSLOG_SERVER)
       {
         log(LOG_INFO, "Setting syslog server: %s", cArgI);
         config.syslog_server = server->arg(i);
         save = true;
       }
-      else if (server->argName(i) == SYSLOG_PORT) 
+      else if (server->argName(i) == SYSLOG_PORT)
       {
         log(LOG_INFO, "Setting syslog port: %d", server->arg(i).toInt());
         config.syslog_port = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == MQTT_ENABLE) 
+      else if (server->argName(i) == REBOOT_ENABLE)
+      {
+        log(LOG_INFO, "Setting reboot enable: %s", cArgI);
+        config.reboot_enable = (server->arg(i) == "1");
+        save = true;
+      }
+      else if (server->argName(i) == REBOOT_DAYS)
+      {
+        // do something here with value from server.arg(i);
+        log(LOG_INFO, "Setting reboot_days: %d", server->arg(i).toInt());
+        config.reboot_days = server->arg(i).toInt();
+        save = true;
+      }
+      else if (server->argName(i) == MQTT_ENABLE)
       {
         log(LOG_INFO, "Setting mqtt enable: %s", cArgI);
         config.mqtt_enable = (server->arg(i) == "1");
         save = true;
       }
-      else if (server->argName(i) == MQTT_SERVER) 
+      else if (server->argName(i) == MQTT_SERVER)
       {
         log(LOG_INFO, "Setting mqtt server: %s", cArgI);
         Serial.println();
         config.mqtt_server = server->arg(i);
         save = true;
       }
-      else if (server->argName(i) == MQTT_PORT) 
+      else if (server->argName(i) == MQTT_PORT)
       {
         log(LOG_INFO, "Setting mqtt port: %d", server->arg(i).toInt());
         config.mqtt_port = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == MQTT_USER) 
+      else if (server->argName(i) == MQTT_SIMPLESTATE)
+      {
+        log(LOG_INFO, "Setting mqtt simplestate: %s", cArgI);
+        config.mqtt_simplestate = (server->arg(i) == "1");
+        save = true;
+      }
+      else if (server->argName(i) == MQTT_USER)
       {
         log(LOG_INFO, "Setting mqtt user: %s", cArgI);
         config.mqtt_user = server->arg(i);
         save = true;
       }
-      else if (server->argName(i) == MQTT_PWD) 
+      else if (server->argName(i) == MQTT_PWD)
       {
         log(LOG_INFO, "Setting mqtt pwd: %s", cArgI);
         config.mqtt_pwd = server->arg(i);
         save = true;
       }
-      else if (server->argName(i) == PIN_IN1) 
+      else if (server->argName(i) == PIN_IN1)
       {
         log(LOG_INFO, "Setting in1: %d", server->arg(i).toInt());
         config.pin_in1 = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == PIN_IN2) 
+      else if (server->argName(i) == PIN_IN2)
       {
         log(LOG_INFO, "Setting in2: %d", server->arg(i).toInt());
         config.pin_in2 = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == PIN_OPENED) 
+      else if (server->argName(i) == PIN_OPENED)
       {
         log(LOG_INFO, "Setting opened: %d", server->arg(i).toInt());
         config.pin_opened = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == PIN_CLOSED) 
+      else if (server->argName(i) == PIN_CLOSED)
       {
         log(LOG_INFO, "Setting closed: %d", server->arg(i).toInt());
         config.pin_closed = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == PIN_DOOPEN) 
+      else if (server->argName(i) == PIN_DOOPEN)
       {
         log(LOG_INFO, "Setting doopen: %d", server->arg(i).toInt());
         config.pin_doopen = server->arg(i).toInt();
         save = true;
       }
-      else if (server->argName(i) == PIN_DOCLOSE) 
+      else if (server->argName(i) == PIN_DOCLOSE)
       {
         log(LOG_INFO, "Setting doclose: %d", server->arg(i).toInt());
         config.pin_doclose = server->arg(i).toInt();
         save = true;
       }
     }
-    if (save) 
+    if (save)
     {
       SaveConfig();
     }
   }
-  
+
   if (save) {
     RestartDevice();
   }
@@ -969,20 +1004,20 @@ void HandleSubmit()
  ***********************************/
 void RestartDevice() {
   log(LOG_INFO, "Restarting device...");
-  
+
   // redirect to the root
   String message = HtmlHead("Restarting...");
   message += "<p>Restarting device to apply new settings. This page will refresh in 25 seconds. (If you changed the hostname or port, you might need to manually change the url.)</p>";
   message += "<p>If the page does not refresh automatically, click <a href=\"/\">here</a>.</p>";
   message += HtmlFoot();
-  
+
   server->sendHeader("Refresh","25; url=/", true);
-  server->send(200, "text/html", message); 
+  server->send(200, "text/html", message);
 
   delay(2000);
-  WiFi.forceSleepBegin(); 
-  //wdt_reset(); 
-  ESP.restart(); 
+  WiFi.forceSleepBegin();
+  //wdt_reset();
+  ESP.restart();
   while(1) wdt_reset();
 }
 
@@ -991,7 +1026,7 @@ void RestartDevice() {
  ***********************************/
 void HandleNotFound() {
   log(LOG_INFO, "HandleNotFound...");
-  
+
   String message = HtmlHead("File Not Found");
   message += "<ul><li>URL: ";
     message += server->uri();
@@ -1007,7 +1042,7 @@ void HandleNotFound() {
     message += "</ul>\n";
   message += "</ul>\n";
   message += "<br><p>Click <a href=\"/\">here</a> to return.</p>\n";
-  
+
   message += HtmlFoot();
   server->send(404, "text/html", message);
 }
@@ -1025,7 +1060,7 @@ void HandleReset() {
 
   server->sendHeader("Refresh","25; url=/", true);
   server->send(200, "text/html", message);
-  
+
   delay(5000);                    // delay to allow the page to be sent and shown in the browser
   WiFiManager wifiManager;        // reset (forget) WiFi settings
   wifiManager.resetSettings();
@@ -1043,21 +1078,23 @@ void HandleConfig() {
   String pagename = "Configuration";
   String message = HtmlHead(pagename);
 
-  
+  // Define the html form:
   message += "<form method='post' action='/submit'>\n";
-  
+
+  // General settings group:
   message += "<fieldset><legend><b>&nbsp;General&nbsp;</b></legend><table>\n";
     message += "<tr><td style='width:190px'> <b>Hostname</b></td><td style='width:160px'><INPUT type=\"text\" name=\"hostname\" value=\"";
       message += config.hostname;
       message += "\" maxlength=\"64\"></td></tr>\n";
-    message += "<tr><td style='width:190px'> <b>Port</b> </td><td style='width:160px'><INPUT type=\"number\" name=\"port\" value=\"";
+    message += "<tr><td style='width:190px'> <b>Port</b> </td><td style='width:160px'><INPUT type=\"number\" name=\"port\" min=\"1\" max=\"99999\" value=\"";
       message += config.port;
       message += "\" maxlength=\"6\"></td></tr>\n";
   message += "</table></fieldset>";
 
+  // MQTT group
   message += "<fieldset><legend><b>&nbsp;MQTT&nbsp;</b></legend><table>\n";
     message += "<tr><td style='width:190px'> <b>Enable?</b> </td><td style='width:160px'><INPUT  style=\"margin:0;width:13px;height:13px;overflow:hidden;\" type=\"checkbox\" name=\"mqtt_enable\" value=\"1\" ";
-      if (config.mqtt_enable) 
+      if (config.mqtt_enable)
       {
         message += " checked=\"checked\" ";
       }
@@ -1074,6 +1111,12 @@ void HandleConfig() {
     message += "<tr><td style='width:190px'> <b>Password</b> </td><td style='width:160px'><INPUT type=\"text\" name=\"mqtt_pwd\" value=\"";
       message += config.mqtt_pwd;
       message += "\" maxlength=\"64\"></td></tr>\n";
+    message += "<tr><td style='width:190px'> <b>Use simple states?</b> </td><td style='width:160px'><INPUT  style=\"margin:0;width:13px;height:13px;overflow:hidden;\" type=\"checkbox\" name=\"mqtt_simplestate\" value=\"1\" ";
+      if (config.mqtt_simplestate)
+      {
+        message += " checked=\"checked\" ";
+      }
+      message += "><label>&nbsp;</label></td></tr>\n";
     message += "<tr><td style='width:190px'> <b>State-topic</b> </td><td style='width:160px'>";
       message += config.mqtt_state;
       message += "</td></tr>\n";
@@ -1085,9 +1128,10 @@ void HandleConfig() {
       message += "</td></tr>\n";
   message += "</table></fieldset>";
 
+  // Syslog group
   message += "<fieldset><legend><b>&nbsp;Syslog&nbsp;</b></legend><table>\n";
     message += "<tr><td style='width:190px'> <b>Enable?</b> </td><td style='width:160px'><INPUT  style=\"margin:0;width:13px;height:13px;overflow:hidden;\" type=\"checkbox\" name=\"syslog_enable\" value=\"1\" ";
-      if (config.syslog_enable) 
+      if (config.syslog_enable)
       {
         message += " checked=\"checked\" ";
       }
@@ -1100,10 +1144,10 @@ void HandleConfig() {
       message += "\" maxlength=\"6\"></td></tr>\n";
   message += "</table></fieldset>";
 
-  
+  // Pins group
   message += "<fieldset><legend><b>&nbsp;Pins&nbsp;</b></legend><table>\n";
     message += "<tr><td style='width:190px'> <b>Enable?</b> </td><td style='width:160px'><INPUT  style=\"margin:0;width:13px;height:13px;overflow:hidden;\" type=\"checkbox\" name=\"enable\" value=\"1\" ";
-      if (config.enable) 
+      if (config.enable)
       {
         message += " checked=\"checked\" ";
       }
@@ -1126,10 +1170,23 @@ void HandleConfig() {
     message += "<tr><td style='width:190px'> <b>DoClose</b> </td><td style='width:160px'>";
       message += htmlPinSelect(PIN_DOCLOSE, config.pin_doclose);
       message += "</td></tr>\n";
-    
+
   message += "</table></fieldset>";
-  
-  
+
+  // Reboot group
+  message += "<fieldset><legend><b>&nbsp;Reboot&nbsp;</b></legend><table>\n";
+    message += "<tr><td style='width:190px'> <b>Automatic reboot?</b> </td><td style='width:160px'><INPUT  style=\"margin:0;width:13px;height:13px;overflow:hidden;\" type=\"checkbox\" name=\"reboot_enable\" value=\"1\" ";
+      if (config.reboot_enable)
+      {
+        message += " checked=\"checked\" ";
+      }
+      message += "><label>&nbsp;</label></td></tr>\n";
+    message += "<tr><td style='width:190px'> <b>Reboot after (days)</b> </td><td style='width:160px'><INPUT type=\"number\" name=\"reboot_days\" min=\"1\" max=\"30\" value=\"";
+      message += config.reboot_days;
+      message += "\" maxlength=\"6\"></td></tr>\n";
+  message += "</table></fieldset>";
+
+
   message += "<br/><button name='save' type='submit' class='button bgrn'>Save</button></form><br/><br/>\n";
   message += "<form action='/reset' method='get'><button class='button bred' onclick=\"return confirm('This will erase the current WiFi config and start the device in AP Mode.');\">WiFiReset</button></form></br>\n";
   message += "<form action='/' method='get'><button class='button'>Main</button></form>\n";
@@ -1147,7 +1204,7 @@ void HandleInfo() {
   String pagename = "Information";
   String msg= HtmlHead(pagename);
 
-  
+
   msg+= "<table border=\"0\" width=\"100%\">\n";
   msg+= "<tr><th>Version</th><td>";
     msg += VERSION;
@@ -1161,9 +1218,9 @@ void HandleInfo() {
     msg += uptime2String();
     msg += "</td></tr>";
   msg += "<tr><th>&nbsp;</th><td>&nbsp;</td></tr>";
-  
+
   msg+= "<tr><th>SSID</th><td>";
-    msg += WiFi.SSID(); 
+    msg += WiFi.SSID();
     msg += " (";
     msg +=  (-1*WiFi.RSSI());
     msg += "%)</td></tr>";
@@ -1176,16 +1233,16 @@ void HandleInfo() {
     msg += WiFi.hostname();
     msg += ")</td></tr>";
   msg+= "<tr><th>IP</th><td>";
-    msg += WiFi.localIP().toString(); 
+    msg += WiFi.localIP().toString();
     msg += "</td></tr>";
   msg+= "<tr><th>Subnet</th><td>";
-    msg += WiFi.subnetMask().toString(); 
+    msg += WiFi.subnetMask().toString();
     msg += "</td></tr>";
   msg+= "<tr><th>Gateway</th><td>";
-    msg += WiFi.gatewayIP().toString(); 
+    msg += WiFi.gatewayIP().toString();
     msg += "</td></tr>";
   msg+= "<tr><th>DNS Server</th><td>";
-    msg += WiFi.dnsIP(0).toString(); 
+    msg += WiFi.dnsIP(0).toString();
     msg += "</td></tr>";
   byte mac[6];                     // the MAC address of your Wifi shield
   WiFi.macAddress(mac);
@@ -1195,10 +1252,10 @@ void HandleInfo() {
   msg += "<tr><th>&nbsp;</th><td>&nbsp;</td></tr>";
 
   msg+= "<tr><th>ESP Chip Id</th><td>";
-      msg += ESP.getChipId(); 
+      msg += ESP.getChipId();
     msg += "</td></tr>";
   msg+= "<tr><th>Flash Chip Id</th><td>";
-      msg += ESP.getFlashChipId(); 
+      msg += ESP.getFlashChipId();
     msg += "</td></tr>";
   msg+= "<tr><th>Flash Size</th><td>";
       msg += ESP.getFlashChipRealSize();
@@ -1215,9 +1272,9 @@ void HandleInfo() {
   msg+= "<tr><th>Free Heap</th><td>";
       msg += ESP.getFreeHeap();
     msg += "</td></tr>";
-    
+
   msg += "</table>\n";
-  
+
   msg += "<br><form action='/' method='get'><button class='button'>Main</button></form>\n";
 
   msg += HtmlFoot();
@@ -1226,11 +1283,11 @@ void HandleInfo() {
 
 /***********************************
  * Return the state script.
- * Rest of script must contain a 
+ * Rest of script must contain a
  * - render(data) furnction
  * - use onload='getHttpState();'
  ***********************************/
-String getStateScript() 
+String getStateScript()
 {
   String script = "\nfunction getHttpState() {\n";
   script += "  var xmlHttp = new XMLHttpRequest();\n";
@@ -1242,7 +1299,7 @@ String getStateScript()
   script += "      }\n";
   script += "      setTimeout(getHttpState, 5000);\n";
   script += "    }\n";
-  script += "  }\n"; 
+  script += "  }\n";
   script += "  xmlHttp.open(\"GET\", window.location.protocol + \"//\" + window.location.host + \"/states\", true); /* true for asynchronous */ \n";
   script += "  xmlHttp.send(null);\n";
   script += "}\n";
@@ -1250,18 +1307,18 @@ String getStateScript()
   script += "  var xmlHttp = new XMLHttpRequest();\n";
   script += "  xmlHttp.open(\"GET\", window.location.protocol + \"//\" + window.location.host + \"/do_close\", true); /* true for asynchronous */ \n";
   script += "  xmlHttp.send(null);\n";
-  script +="}\n";  
+  script +="}\n";
   script += "\nfunction doOpen() {\n";
   script += "  var xmlHttp = new XMLHttpRequest();\n";
   script += "  xmlHttp.open(\"GET\", window.location.protocol + \"//\" + window.location.host + \"/do_open\", true); /* true for asynchronous */ \n";
   script += "  xmlHttp.send(null);\n";
-  script +="}\n";  
+  script +="}\n";
   script += "\nfunction doStop() {\n";
   script += "  var xmlHttp = new XMLHttpRequest();\n";
   script += "  xmlHttp.open(\"GET\", window.location.protocol + \"//\" + window.location.host + \"/do_stop\", true); /* true for asynchronous */ \n";
   script += "  xmlHttp.send(null);\n";
-  script +="}\n";  
-    
+  script +="}\n";
+
   return script;
 }
 
@@ -1271,11 +1328,13 @@ String getStateScript()
 void HandleState() {
   log(LOG_INFO, "HandleState...");
 
-  String pagename = "Current State";  
+  String pagename = "Current State";
   String script = getStateScript();
   script += "\nfunction render(data) {\n";
-  script += "  document.getElementById(\"curstate\").innerHTML = data.state.name ;\n";
-  
+  script += "  document.getElementById(\"curstate\").innerHTML =  data.state.name;\n";
+
+  script += "  document.getElementById(\"UPTIME\").innerHTML = 'Uptime: ' + data.state.uptime;\n";
+
   script += "  document.getElementById(\"IN1\").innerHTML = GetPinButton('IN1', data.state.in1, 1); \n";
   script += "  document.getElementById(\"IN2\").innerHTML = GetPinButton('IN2', data.state.in2, 1); \n";
   script += "  document.getElementById(\"OPENED\").innerHTML = GetPinButton('Opened', data.state.opened, 0); \n";
@@ -1294,6 +1353,7 @@ void HandleState() {
   String message = HtmlHead(pagename, script, "getHttpState();");
   message += "<div id=\"curstate\" style=\"text-align:center;font-weight:bold;font-size:48px\"></div>";
   message += "<table border=0 width=\"100%\">\n";
+  message += "<tr><td id=\"UPTIME\" colspan=\"2\" style=\"text-align:center;\"></td></tr>\n";
   message += "<tr><td id=\"IN1\"></td><td id=\"IN2\"></td></tr>\n";
   message += "<tr><td id=\"OPENED\"></td><td id=\"CLOSED\"></td></tr>\n";
   message += "<tr><td id=\"DOOPEN\"></td><td id=\"DOCLOSE\"></td></tr>\n";
@@ -1312,7 +1372,7 @@ void HandleState() {
  ***********************************/
 void HandleStates() {
   log(LOG_INFO, "HandleStates...");
-  
+
   String msg = "{ \"config\" : {  \"enable\" : \"";
   msg += config.enable;
   msg += "\", \"hostname\": \"";
@@ -1349,7 +1409,9 @@ void HandleStates() {
   msg += config.pin_doopen;
   msg += ", \"do_close\" : ";
   msg += config.pin_doclose;
-  msg += " } }, \"state\" : { \"name\" : \"";
+  msg += " } }, \"state\" : { \"uptime\": \"";
+  msg += uptime2String();
+  msg += "\", \"name\" : \"";
   msg += getStateName();
   msg += "\", \"number\" : ";
   msg += curState;
@@ -1372,15 +1434,15 @@ void HandleStates() {
 
 
 /***********************************
- * Stop the motor by setting in1, 
+ * Stop the motor by setting in1,
  * in2 to low
  ***********************************/
-void motorStop() 
+void motorStop()
 {
   timeoutRunning = false;
-  
+
   digitalWrite(config.pin_in1, LOW);
-  digitalWrite(config.pin_in2, LOW); 
+  digitalWrite(config.pin_in2, LOW);
 }
 
 /***********************************
@@ -1392,7 +1454,7 @@ void motorClose()
   timeoutRunning = true;
 
   digitalWrite(config.pin_in1, LOW);
-  digitalWrite(config.pin_in2, HIGH); 
+  digitalWrite(config.pin_in2, HIGH);
 }
 
 /***********************************
@@ -1404,7 +1466,7 @@ void motorOpen()
   timeoutRunning = true;
 
   digitalWrite(config.pin_in1, HIGH);
-  digitalWrite(config.pin_in2, LOW); 
+  digitalWrite(config.pin_in2, LOW);
 }
 
 /***********************************
@@ -1417,8 +1479,8 @@ void setStateClosed()
   do_close = false;
   do_open = false;
   do_stop = false;
-  
-  motorStop(); 
+
+  motorStop();
   if (curState != STATE_CLOSED)
   {
     log(LOG_INFO, "Blind is closed.");
@@ -1429,21 +1491,21 @@ void setStateClosed()
       config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
       client.publish(cState, getStateName(), false);
     }
-  }  
+  }
 }
 
 /***********************************
  * Set current state = Closing
  ***********************************/
-void setStateClosing() 
+void setStateClosing()
 {
   log(LOG_INFO, "setStateClosing...");
 
   do_close = false;
   do_open = false;
   do_stop = false;
-  
-  motorClose(); 
+
+  motorClose();
   if (curState != STATE_CLOSING)
   {
     log(LOG_INFO, "Blind will close...");
@@ -1454,21 +1516,21 @@ void setStateClosing()
       config.mqtt_state.toCharArray(cState, config.mqtt_state.length()+1);
       client.publish(cState, getStateName(), false);
     }
-  }  
+  }
 }
 
 /***********************************
  * Set current state = Open
  ***********************************/
-void setStateOpen() 
+void setStateOpen()
 {
   log(LOG_INFO, "setStateOpen...");
-  
+
   do_close = false;
   do_open = false;
   do_stop = false;
-  
-  motorStop(); 
+
+  motorStop();
   if (curState != STATE_OPEN)
   {
     log(LOG_INFO, "Blind is open.");
@@ -1485,15 +1547,15 @@ void setStateOpen()
 /***********************************
  * Set current state = Opening
  ***********************************/
-void setStateOpening() 
+void setStateOpening()
 {
   log(LOG_INFO, "setStateOpening...");
 
   do_close = false;
   do_open = false;
   do_stop = false;
-  
-  motorOpen(); 
+
+  motorOpen();
   if (curState != STATE_OPENING)
   {
     log(LOG_INFO, "Blind will open...");
@@ -1510,7 +1572,7 @@ void setStateOpening()
 /***********************************
  * Set current state = Unknown
  ***********************************/
-void setStateUnknown() 
+void setStateUnknown()
 {
   log(LOG_INFO, "setStateUnknown...");
 
@@ -1518,7 +1580,7 @@ void setStateUnknown()
   do_open = false;
   do_stop = false;
 
-  motorStop(); 
+  motorStop();
   if (curState != STATE_UNKNOWN)
   {
     log(LOG_INFO, "Blind will stop...");
@@ -1533,22 +1595,35 @@ void setStateUnknown()
 }
 
 /***********************************
+ * Handle automatic rebooting
+ ***********************************/
+void HandleAutomaticReboot()
+{
+  // check if we should execute an automatic reboot:
+  if (config.reboot_enable && (Day >= config.reboot_days) )
+  {
+    log(LOG_INFO, "Performing automatic restart...");
+    RestartDevice();
+  }
+}
+
+/***********************************
  * Handle inputs and outputs
  ***********************************/
-void HandlePins() 
+void HandlePins()
 {
  /* -----------------------------------------------------------
-  * -----------------------------------------------------------*/ 
+  * -----------------------------------------------------------*/
   openedSW->update();  // call this every loop to update switch state
   closedSW->update();  // call this every loop to update switch state
   doOpenSW->update();  // call this every loop to update switch state
   doCloseSW->update(); // call this every loop to update switch state
-  
+
   //log(LOG_INFO, "HandlePins: openedSW:closedSW:doOpenSW:doCloseSW - %i:%i:%i:%i", openedSW->isDown(), closedSW->isDown(), doOpenSW->isDown(), doCloseSW->isDown());
-  
+
   // ****************************************************************
   // check for timeout:
-  if (timeoutRunning && ((millis() - timeoutStart) >= (config.timeout*1000))) 
+  if (timeoutRunning && ((millis() - timeoutStart) >= (config.timeout*1000)))
   {
     log(LOG_INFO, "Timeout! stopping motor...");
     setStateUnknown();
@@ -1556,9 +1631,9 @@ void HandlePins()
   // ****************************************************************
   // state machine:
   switch (curState)
-  {  
+  {
     case STATE_OPEN:
-      if ((doCloseSW->isChanged() && doCloseSW->isDown()) || do_close) 
+      if ((doCloseSW->isChanged() && doCloseSW->isDown()) || do_close)
       {
         log(LOG_INFO, "OPEN: doClose!");
         setStateClosing();
@@ -1594,12 +1669,12 @@ void HandlePins()
         setStateClosed();
       }
       else if ( (doOpenSW->isChanged() && doOpenSW->isDown()) || do_stop)
-      { 
+      {
         log(LOG_INFO, "CLOSING: doOpen or doStop!");
         setStateUnknown();
       }
       else if (do_open)
-      { 
+      {
         log(LOG_INFO, "CLOSING: do_open !");
         setStateUnknown();    // stop motor running
         setStateOpening();    // reverse motor
@@ -1631,15 +1706,15 @@ void HandlePins()
 /***********************************
  * MQTT Callback hook
  ***********************************/
-void callback(char* topic, byte* payload, unsigned int length) 
+void callback(char* topic, byte* payload, unsigned int length)
 {
   payload[length] = '\0';
   String strTopic = String((char*)topic);
-  if (strTopic == config.mqtt_do) 
+  if (strTopic == config.mqtt_do)
   {
     char * msg = (char*)payload;
     log(LOG_INFO, "mqtt_do: %s", msg);
-    
+
     if (strcmp(msg, "open")==0)
     {
       do_close = false;
@@ -1662,13 +1737,13 @@ void callback(char* topic, byte* payload, unsigned int length)
 }
 
 /***********************************
- * Makes a count of the total uptime 
- * since last start 
+ * Makes a count of the total uptime
+ * since last start
  ***********************************/
 void uptime()
 {
-  /** Making Note of an expected rollover *****/   
-  if(millis()>=3000000000){ 
+  /** Making Note of an expected rollover *****/
+  if(millis()>=3000000000){
     HighMillis=1;
   }
 
@@ -1682,7 +1757,7 @@ void uptime()
   Second = secsUp%60;
   Minute = (secsUp/60)%60;
   Hour = (secsUp/(60*60))%24;
-  Day = (Rollover*50)+(secsUp/(60*60*24));  // First portion takes care of a rollover [around 50 days]                     
+  Day = (Rollover*50)+(secsUp/(60*60*24));  // First portion takes care of a rollover [around 50 days]
 }
 
 /***********************************
@@ -1714,18 +1789,18 @@ String mac2String(byte ar[]){
 /***********************************
  * main Loop
  ***********************************/
-void loop() 
+void loop()
 {
   // put your main code here, to run repeatedly:
   uptime(); //Runs the uptime script located below the main loop and reenters the main loop
 
   if (WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress(0,0,0,0)) {
-    if ( (millis() - lastWiFIConnectAttempt)>5000)
+    if ( (millis() - lastWiFIConnectAttempt) > 5000)
     {
       log(LOG_INFO, "WiFi is disconnected, trying reconnect...");
       WiFi.reconnect();
       delay(1000);
-      lastWiFIConnectAttempt = millis();     
+      lastWiFIConnectAttempt = millis();
     }
   }
   if (WiFi.status() == WL_CONNECTED )
@@ -1733,16 +1808,17 @@ void loop()
     PubSubConnect();
     PubSubLoop();
   }
-  if (config.enable) 
+  if (config.enable)
   {
     HandlePins();
   }
-  
+
   if (WiFi.status() == WL_CONNECTED )
   {
     // ****************************************************************
     // handle web requests:
     server->handleClient();       // handle webServer
-  }
 
+    HandleAutomaticReboot();
+  }
 }

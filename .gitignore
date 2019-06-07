@@ -1,0 +1,14 @@
+.vscode/
+.idea
+.grunt/
+.fusion/
+.coverage/
+.eslintrc.js
+.editorconfig
+.svn
+.git
+.project
+build/
+old/
+_old/
+working/
