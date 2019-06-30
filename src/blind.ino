@@ -47,8 +47,9 @@
  *                    Configurable restart after n days uptime
  *                    Configurate SimpleState feature (only use OPEN and CLOSE) for better Cover support in HomeAssistant
  *                    Show uptime on Status page
+ *  0.9.7   20190629  Determine initial state after start/reboot to Opened/Closed if the blind is actually opened/closed on startup
  **************************************************************/
-  const char* VERSION = "0.9.6 (20190606)";
+  const char* VERSION = "0.9.7 (20190629)";
   const char* COPYRIGHT = "(c) Janssen Development, 2019.";
 /***********************se***************************************
  *
@@ -143,15 +144,15 @@ const int DEF_TIMEOUT = 20;
 // **************************************************
 // Global variables
 // --------------------------------------------------
-DebouncedSwitch *openedSW;  // opened switch
-DebouncedSwitch *closedSW;  // opened switch
-DebouncedSwitch *doOpenSW;  // opened switch
-DebouncedSwitch *doCloseSW;  // opened switch
+DebouncedSwitch *openedSW;                  // opened switch
+DebouncedSwitch *closedSW;                  // opened switch
+DebouncedSwitch *doOpenSW;                  // opened switch
+DebouncedSwitch *doCloseSW;                 // opened switch
 
 std::unique_ptr<ESP8266WebServer> server;   // Set web server
 
-// A UDP instance to let us send and receive packets over UDP
-WiFiUDP udpClient;
+
+WiFiUDP udpClient;                          // A UDP instance to let us send and receive packets over UDP
 
 Syslog syslog(udpClient, SYSLOG_PROTO_BSD); // syslog utility
 bool syslogReady = false;                   // true indicates, syslog can be used
@@ -161,33 +162,33 @@ PubSubClient client(espClient);             // MQTT PubSubCLient
 
 // Configuration that we'll store on disk:
 struct Config {
-  bool enable;             // master enable switch
-  String hostname;         // hostname
-  int port;                // http server port number
-  bool syslog_enable;      // syslog enable
-  String syslog_server;    // syslog server
-  int syslog_port;         // syslog port
-  bool reboot_enable;      // enable automatic reboot
-  int reboot_days;         // reboot after [1..30] days
-  bool mqtt_enable;        // enable mqtt?
-  String mqtt_server;      // mqtt server
-  IPAddress mqtt_ip;       // mqtt server IP address
-  int mqtt_port;           // mqtt port
-  bool mqtt_simplestate;   // mqtt simple state (only open/closed)
-  String mqtt_user;        // mqtt username
-  String mqtt_pwd;         // mqtt password
-  String mqtt_state;       // <hostname>/state
-  String mqtt_do;          // <hostname>/do OPEN/CLOSE/STOP
-  String mqtt_lwt;         // <hostname>/LWT Online/Offline
-  int timeout;             // timout in seconds for opening or closing the blind
-  int pin_in1;             // IN1/2 pin for i298n hBridge
-  int pin_in2;             // IN2/4 pin for i298n hBridge
-  int pin_opened;          // OPENED pin
-  int pin_closed;          // CLOSED pin
-  int pin_doopen;          // DO OPEN pin
-  int pin_doclose;         // DO CLOSE pin
+  bool enable;                              // master enable switch
+  String hostname;                          // hostname
+  int port;                                 // http server port number
+  bool syslog_enable;                       // syslog enable
+  String syslog_server;                     // syslog server
+  int syslog_port;                          // syslog port
+  bool reboot_enable;                       // enable automatic reboot
+  int reboot_days;                          // reboot after [1..30] days
+  bool mqtt_enable;                         // enable mqtt?
+  String mqtt_server;                       // mqtt server
+  IPAddress mqtt_ip;                        // mqtt server IP address
+  int mqtt_port;                            // mqtt port
+  bool mqtt_simplestate;                    // mqtt simple state (only open/closed)
+  String mqtt_user;                         // mqtt username
+  String mqtt_pwd;                          // mqtt password
+  String mqtt_state;                        // <hostname>/state
+  String mqtt_do;                           // <hostname>/do OPEN/CLOSE/STOP
+  String mqtt_lwt;                          // <hostname>/LWT Online/Offline
+  int timeout;                              // timout in seconds for opening or closing the blind
+  int pin_in1;                              // IN1/2 pin for i298n hBridge
+  int pin_in2;                              // IN2/4 pin for i298n hBridge
+  int pin_opened;                           // OPENED pin
+  int pin_closed;                           // CLOSED pin
+  int pin_doopen;                           // DO OPEN pin
+  int pin_doclose;                          // DO CLOSE pin
 };
-Config config;             // <- global configuration object
+Config config;                              // <- global configuration object
 
 /**** uptime ***/
 long Day=0;
@@ -199,17 +200,17 @@ int Rollover=0;
 /***************/
 
 /**** state related ***/
-int curState = STATE_UNKNOWN;
-unsigned long timeoutStart = 0;            // the time the delay started
-bool timeoutRunning = false;               // true if still waiting for delay to finish
-unsigned long lastConnectAttempt = 0;      // the last time we tried to connect to mqtt server
-unsigned long lastWiFIConnectAttempt = 0;  // the last time we tried to connect to WiFi
-unsigned long lastLWTSent = 0;             // the last time we sent the LWT message
+int curState = STATE_UNKNOWN;               // initially, curstate will be unknown...
+unsigned long timeoutStart = 0;             // the time the delay started
+bool timeoutRunning = false;                // true if still waiting for delay to finish
+unsigned long lastConnectAttempt = 0;       // the last time we tried to connect to mqtt server
+unsigned long lastWiFIConnectAttempt = 0;   // the last time we tried to connect to WiFi
+unsigned long lastLWTSent = 0;              // the last time we sent the LWT message
 
-//Booleans to allow control via webpage & mqtt:
-bool do_stop = false;                   // stop motor running
-bool do_open = false;                   // open blind
-bool do_close = false;                  // close blind
+// Booleans to allow control via webpage & mqtt:
+bool do_stop = false;                       // stop motor running
+bool do_open = false;                       // open blind
+bool do_close = false;                      // close blind
 /**********************/
 
 /*************************
@@ -420,6 +421,19 @@ void setup()
   closedSW  = new DebouncedSwitch(config.pin_closed);   // closed switch
   doOpenSW  = new DebouncedSwitch(config.pin_doopen);   // doOpen switch
   doCloseSW = new DebouncedSwitch(config.pin_doclose);  // doClose switch
+
+  // try to determine initial state; initial state is /unknown/
+  openedSW->update();
+  closedSW->update();
+  doOpenSW->update();
+  doCloseSW->update();
+
+  if (openedSW->isDown()) {
+    setStateOpen();
+  }
+  if (closedSW->isDown()) {
+    setStateClosed();
+  }
 
   // Set outputs to LOW
   digitalWrite(config.pin_in1, LOW);;

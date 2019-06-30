@@ -38,16 +38,16 @@ An ESP8266 based blind controller, to control (for example) a window blind for a
 ## Connections / Schematic
 **ESP8266**:
 
- - D1 --> Closed switch
- - D2 --> Open switch
- - D3 --> L298N IN1
- - D4 --> L298N IN2
- - D5 --> do_open switch
- - D6 --> do_close switch
+ - D1/GPIO5 --> Closed switch
+ - D7/GPIO13 --> Open switch
+ - D3/GPIO0 --> L298N IN1
+ - D4/GPIO2 --> L298N IN2
+ - D5/GPIO14 --> do_open switch
+ - D6/GPIO12 --> do_close switch
  - 5V --> L298N 5V out
  - 0V --> L298N 0V
 
-**Switches**: 
+**Switches**:
 All switches connect to ground.
 
 **L298N**:
@@ -65,7 +65,7 @@ All switches connect to ground.
  - Open: switch closed when blind is fully open  (outputs 0V when switch is closed)
  - do_open: switch to open the blind (0V when switch is momentarily closed)
  - do_close: switch to close the blind (0V when switch is momentarily closed)
- 
- 
- 
- 
+
+
+
+
