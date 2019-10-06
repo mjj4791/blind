@@ -1,5 +1,8 @@
 # Blind
 An ESP8266 based blind controller, to control (for example) a window blind for a skylight.
+I recently replaced this piece of custom coding with [esphome](https://www.esphome.io) and a cover-endstops configuration. See [here](https://github.com/mjj4791/esphome_blind) for more information on that.
+Below is the original arduino project.
+
 
 ![test](https://github.com/mjj4791/blind/blob/master/img/Main.png)
 
